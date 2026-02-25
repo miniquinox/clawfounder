@@ -1,0 +1,4 @@
+# Add your connector's dependencies here, one per line.
+# Example:
+# requests>=2.28.0
+# some-api-client>=1.0.0

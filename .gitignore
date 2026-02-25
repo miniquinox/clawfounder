@@ -1,0 +1,33 @@
+# Environment
+.env
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# OAuth tokens
+*_token.json
+token.json
+
+# Credentials
+credentials.json
+*.key
+*.pem
+service_account.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+env/
