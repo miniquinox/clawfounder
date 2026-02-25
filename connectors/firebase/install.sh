@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "🔥 Installing Firebase connector..."
-pip3 install -r "$(dirname "$0")/requirements.txt"
+uv pip install -r "$(dirname "$0")/requirements.txt"
 echo ""
 echo "✅ Done! Set in your .env:"
 echo "   FIREBASE_PROJECT_ID=your-project-id"

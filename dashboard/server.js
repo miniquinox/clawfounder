@@ -18,6 +18,7 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const ENV_FILE = path.join(PROJECT_ROOT, '.env');
 const CONNECTORS_DIR = path.join(PROJECT_ROOT, 'connectors');
 const FIREBASE_CONFIG = path.join(os.homedir(), '.config', 'configstore', 'firebase-tools.json');
+const GMAIL_TOKEN_FILE = path.join(os.homedir(), '.clawfounder', 'gmail_token.json');
 
 const app = express();
 app.use(cors());
@@ -99,8 +100,8 @@ function discoverConnectors() {
             });
         }
 
-        // Firebase uses Google login, not manual keys
-        const usesGoogleLogin = folder.name === 'firebase';
+        // Firebase and Gmail use Google login, not manual keys
+        const usesGoogleLogin = folder.name === 'firebase' || folder.name === 'gmail';
 
         connectors.push({
             name: folder.name,
@@ -181,6 +182,9 @@ app.get('/api/connectors', (req, res) => {
         if (c.name === 'firebase') {
             // Firebase is connected if Google login exists + project ID is set
             connected = !!(firebaseAuth?.hasToken && env['FIREBASE_PROJECT_ID']);
+        } else if (c.name === 'gmail') {
+            // Gmail is connected if OAuth token exists
+            connected = fs.existsSync(GMAIL_TOKEN_FILE);
         } else {
             connected = c.envVars
                 .filter(v => v.required)
@@ -299,6 +303,86 @@ app.post('/api/firebase/select-project', (req, res) => {
     }
 });
 
+// ── Gmail-specific routes ────────────────────────────────────
+
+function runPython(args) {
+    const uvVenvPy = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const venvPy = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+    const py = fs.existsSync(uvVenvPy) ? uvVenvPy : fs.existsSync(venvPy) ? venvPy : 'python3';
+    const envVars = { ...process.env, ...readEnv() };
+
+    return new Promise((resolve, reject) => {
+        const proc = spawn(py, args, { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: envVars });
+        let out = '', err = '';
+        proc.stdout.on('data', d => { out += d; });
+        proc.stderr.on('data', d => { err += d; });
+        proc.on('close', () => {
+            if (err) console.error('[gmail_auth]', err.trim());
+            try { resolve(JSON.parse(out.trim())); } catch { reject(new Error(err || out || 'unknown error')); }
+        });
+    });
+}
+
+// Check Gmail login status
+app.get('/api/gmail/status', (req, res) => {
+    try {
+        if (!fs.existsSync(GMAIL_TOKEN_FILE)) {
+            return res.json({ loggedIn: false, email: null });
+        }
+        const tokenData = JSON.parse(fs.readFileSync(GMAIL_TOKEN_FILE, 'utf-8'));
+        const loggedIn = !!(tokenData.refresh_token || tokenData.token);
+        const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
+        const email = fs.existsSync(emailFile) ? fs.readFileSync(emailFile, 'utf-8').trim() : null;
+        res.json({ loggedIn, email });
+    } catch {
+        res.json({ loggedIn: false, email: null });
+    }
+});
+
+// Get the Google OAuth URL — frontend opens it in a popup
+app.post('/api/gmail/login', async (req, res) => {
+    const env = readEnv();
+    const hasClientId = env['GMAIL_CLIENT_ID'] && env['GMAIL_CLIENT_ID'].length > 0;
+    const credsFilePath = env['GMAIL_CREDENTIALS_FILE'] ? path.resolve(PROJECT_ROOT, env['GMAIL_CREDENTIALS_FILE']) : '';
+    const hasCredsFile = credsFilePath && fs.existsSync(credsFilePath);
+
+    if (!hasClientId && !hasCredsFile) {
+        return res.status(400).json({ status: 'error', error: 'Gmail OAuth not configured. Set GMAIL_CREDENTIALS_FILE in .env.' });
+    }
+    if (fs.existsSync(GMAIL_TOKEN_FILE)) {
+        return res.json({ status: 'already_authenticated' });
+    }
+
+    try {
+        const result = await runPython([path.join(__dirname, 'gmail_auth.py'), '--url-only']);
+        if (result.error) return res.status(400).json({ status: 'error', error: result.error });
+        res.json({ status: 'started', authUrl: result.authUrl });
+    } catch (err) {
+        res.status(500).json({ status: 'error', error: err.message });
+    }
+});
+
+// Google redirects the popup here after user authorizes
+app.get('/api/gmail/callback', async (req, res) => {
+    const { code, error } = req.query;
+    const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const errorPage = msg => `<html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a2e;color:#ef4444"><h2>${esc(msg)}</h2></body></html>`;
+
+    if (error || !code) {
+        return res.send(errorPage(error || 'Missing auth code'));
+    }
+    try {
+        const result = await runPython([path.join(__dirname, 'gmail_auth.py'), '--exchange-code', code]);
+        if (result.success) {
+            res.send('<html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px">✅</div><h2 style="color:#4ade80;margin:0">Gmail connected!</h2><p style="color:#888;margin-top:8px">Closing...</p></div><script>setTimeout(()=>window.close(),1200)</script></body></html>');
+        } else {
+            res.send(errorPage(result.error || 'Login failed'));
+        }
+    } catch (err) {
+        res.send(errorPage(err.message));
+    }
+});
+
 // ── Chat SSE endpoint ───────────────────────────────────────────
 
 // List available providers (ones with API keys set)
@@ -329,9 +413,10 @@ app.post('/api/chat', (req, res) => {
     const envVars = { ...process.env, ...readEnv() };
 
     const pyScript = path.join(__dirname, 'chat_agent.py');
-    // Use venv Python if available (has google-genai SDK)
+    // Use venv Python if available — check uv's .venv first, then venv
+    const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
     const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
-    const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python3';
+    const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython : fs.existsSync(venvPython) ? venvPython : 'python3';
     console.log(`[chat] Spawning: ${pythonCmd} ${pyScript}`);
 
     const proc = spawn(pythonCmd, [pyScript], {

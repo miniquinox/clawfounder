@@ -27,13 +27,6 @@ echo ""
 
 step "Checking prerequisites..."
 
-if ! command -v python3 &>/dev/null; then
-    fail "python3 not found. Install Python 3.10+ from https://python.org"
-    exit 1
-fi
-PYVER=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
-ok "Python $PYVER"
-
 if ! command -v node &>/dev/null; then
     fail "node not found. Install Node.js 18+ from https://nodejs.org"
     exit 1
@@ -47,32 +40,39 @@ if ! command -v npm &>/dev/null; then
 fi
 ok "npm $(npm --version)"
 
-# ── Python virtual environment ───────────────────────────────────
+# ── Install uv if needed ─────────────────────────────────────────
 
-step "Setting up Python virtual environment..."
+step "Setting up Python environment (uv)..."
 
-if [ ! -d "venv" ]; then
-    python3 -m venv venv
-    ok "Created venv/"
+if ! command -v uv &>/dev/null; then
+    echo "  Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    export PATH="$HOME/.local/bin:$PATH"
+    ok "Installed uv"
 else
-    ok "venv/ already exists"
+    ok "uv $(uv --version)"
 fi
 
-source venv/bin/activate
-ok "Activated venv"
+# ── Python virtual environment ───────────────────────────────────
+
+if [ ! -d ".venv" ]; then
+    uv venv
+    ok "Created .venv/"
+else
+    ok ".venv/ already exists"
+fi
 
 # ── Python dependencies ──────────────────────────────────────────
 
 step "Installing Python dependencies..."
-pip install -q --upgrade pip
-pip install -q -r requirements.txt
-ok "Core dependencies installed (google-genai, requests, dotenv)"
+uv pip install -r requirements.txt
+ok "Core dependencies installed"
 
 # Install connector requirements if they exist
 for req in connectors/*/requirements.txt; do
     if [ -f "$req" ]; then
         connector=$(basename $(dirname "$req"))
-        pip install -q -r "$req" 2>/dev/null && ok "$connector dependencies" || warn "$connector deps failed (non-critical)"
+        uv pip install -r "$req" 2>/dev/null && ok "$connector dependencies" || warn "$connector deps failed (non-critical)"
     fi
 done
 

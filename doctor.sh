@@ -64,22 +64,37 @@ fi
 
 section "Python Environment"
 
-if [ -d "venv" ]; then
-    ok "venv/ exists"
+if command -v uv &>/dev/null; then
+    ok "uv $(uv --version)"
 else
-    fail "venv/ missing — run: python3 -m venv venv"
+    fail "uv not found — install from https://docs.astral.sh/uv/"
+fi
+
+if [ -d ".venv" ]; then
+    ok ".venv/ exists"
+elif [ -d "venv" ]; then
+    warn "Legacy venv/ found — consider switching: uv venv"
+else
+    fail ".venv/ missing — run: uv venv"
 fi
 
 # Activate venv for package checks
-if [ -f "venv/bin/activate" ]; then
-    source venv/bin/activate
-    
+VENV_ACTIVATE=""
+if [ -f ".venv/bin/activate" ]; then
+    VENV_ACTIVATE=".venv/bin/activate"
+elif [ -f "venv/bin/activate" ]; then
+    VENV_ACTIVATE="venv/bin/activate"
+fi
+
+if [ -n "$VENV_ACTIVATE" ]; then
+    source "$VENV_ACTIVATE"
+
     # Check core packages
     for pkg in dotenv requests; do
         if python3 -c "import $pkg" 2>/dev/null; then
             ok "python: $pkg"
         else
-            fail "python: $pkg missing — run: pip install -r requirements.txt"
+            fail "python: $pkg missing — run: uv pip install -r requirements.txt"
         fi
     done
 
@@ -87,7 +102,7 @@ if [ -f "venv/bin/activate" ]; then
     if python3 -c "from google import genai" 2>/dev/null; then
         ok "python: google-genai"
     else
-        fail "python: google-genai missing — run: pip install google-genai"
+        fail "python: google-genai missing — run: uv pip install google-genai"
     fi
 fi
 
@@ -197,6 +212,14 @@ if [ -f "$FIREBASE_CONFIG" ]; then
     fi
 else
     warn "Firebase CLI not authenticated (optional) — run: npx firebase-tools login"
+fi
+
+# Check Gmail auth
+GMAIL_TOKEN="$HOME/.clawfounder/gmail_token.json"
+if [ -f "$GMAIL_TOKEN" ]; then
+    ok "Gmail authenticated"
+else
+    warn "Gmail not authenticated (optional) — sign in via the dashboard"
 fi
 
 # Check if ports are available
