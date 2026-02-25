@@ -349,7 +349,7 @@ app.get('/api/gmail/status', (req, res) => {
     }
 });
 
-// Start gcloud ADC login (mirrors Firebase login pattern)
+// Start gcloud ADC login + auto-configure quota project, Gmail API, and IAM
 app.post('/api/gmail/login', (req, res) => {
     if (gmailLoginProcess) {
         return res.json({ status: 'already_running', message: 'Login already in progress. Complete it in your browser.' });
@@ -371,10 +371,142 @@ app.post('/api/gmail/login', (req, res) => {
 
     proc.on('close', (code) => {
         gmailLoginProcess = null;
-        console.log('Gmail gcloud login process exited with code:', code);
+        console.log('[gmail] ADC login exited with code:', code);
+
+        if (code !== 0) {
+            console.log('[gmail] Login failed:', output.slice(-200));
+            return;
+        }
+
+        // ── Post-login automation ──────────────────────────────
+        console.log('[gmail] Login succeeded. Running post-login setup...');
+
+        const { execSync } = require('child_process');
+        const run = (cmd) => {
+            try {
+                return execSync(cmd, { encoding: 'utf-8', timeout: 30000 }).trim();
+            } catch (e) {
+                console.log(`[gmail] Command failed: ${cmd}`, e.message?.slice(0, 200));
+                return null;
+            }
+        };
+
+        // 1. Detect the user's GCP project
+        let quotaProject = null;
+        const env = readEnv();
+
+        // Prefer FIREBASE_PROJECT_ID if set (user already configured it)
+        if (env['FIREBASE_PROJECT_ID']) {
+            quotaProject = env['FIREBASE_PROJECT_ID'];
+        }
+        // Otherwise, try gcloud config
+        if (!quotaProject) {
+            quotaProject = run('gcloud config get-value project 2>/dev/null');
+        }
+        // Last resort: first project in list
+        if (!quotaProject) {
+            const first = run('gcloud projects list --format="value(projectId)" --limit=1 2>/dev/null');
+            if (first) quotaProject = first;
+        }
+
+        if (!quotaProject) {
+            console.log('[gmail] ⚠ No GCP project found. Gmail may not work without a quota project.');
+            return;
+        }
+        console.log(`[gmail] Using quota project: ${quotaProject}`);
+
+        // 2. Enable Gmail API on the project
+        console.log(`[gmail] Enabling Gmail API on ${quotaProject}...`);
+        run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
+
+        // 3. Detect the logged-in email from the ADC file
+        let userEmail = null;
+        try {
+            // ADC doesn't store email, but we can get it from gcloud auth
+            const accounts = run('gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null');
+            if (accounts) userEmail = accounts.split('\n')[0].trim();
+        } catch { /* best effort */ }
+
+        // 4. Grant serviceUsageConsumer role (idempotent)
+        if (userEmail) {
+            console.log(`[gmail] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
+            run(`gcloud projects add-iam-policy-binding ${quotaProject} --member="user:${userEmail}" --role="roles/serviceusage.serviceUsageConsumer" --condition=None --quiet 2>/dev/null`);
+
+            // Save email for display
+            const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
+            try {
+                fs.mkdirSync(path.dirname(emailFile), { recursive: true });
+                fs.writeFileSync(emailFile, userEmail);
+            } catch { /* best effort */ }
+        }
+
+        // 5. Set quota_project_id in the ADC file
+        try {
+            const adcData = JSON.parse(fs.readFileSync(ADC_FILE, 'utf-8'));
+            adcData.quota_project_id = quotaProject;
+            fs.writeFileSync(ADC_FILE, JSON.stringify(adcData, null, 2));
+            console.log(`[gmail] ✅ Set quota_project_id=${quotaProject} in ADC file`);
+        } catch (e) {
+            console.log('[gmail] ⚠ Could not update ADC file:', e.message);
+        }
+
+        console.log('[gmail] ✅ Post-login setup complete!');
     });
 
     res.json({ status: 'started', message: 'Browser should open for Google login. Complete the login there.' });
+});
+
+// ── Disconnect endpoint ─────────────────────────────────────────
+
+app.post('/api/connector/:name/disconnect', (req, res) => {
+    const { name } = req.params;
+    try {
+        if (name === 'firebase') {
+            // Clear project ID from .env (keep gcloud auth intact)
+            const env = readEnv();
+            if (env['FIREBASE_PROJECT_ID']) {
+                writeEnv({ FIREBASE_PROJECT_ID: '' });
+            }
+            return res.json({ success: true, message: 'Firebase disconnected. Project ID cleared.' });
+        }
+
+        if (name === 'gmail') {
+            // Remove legacy token file
+            if (fs.existsSync(GMAIL_TOKEN_FILE)) {
+                fs.unlinkSync(GMAIL_TOKEN_FILE);
+            }
+            // Remove email cache
+            const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
+            if (fs.existsSync(emailFile)) {
+                fs.unlinkSync(emailFile);
+            }
+            // Revoke ADC (gcloud application-default credentials)
+            try {
+                spawn('gcloud', ['auth', 'application-default', 'revoke', '--quiet'], { shell: true });
+            } catch { /* best effort */ }
+            return res.json({ success: true, message: 'Gmail disconnected. Token revoked.' });
+        }
+
+        // Generic connector: clear all env vars from .env
+        const connectors = discoverConnectors();
+        const connector = connectors.find(c => c.name === name);
+        if (!connector) {
+            return res.status(404).json({ error: `Connector "${name}" not found.` });
+        }
+
+        if (connector.envVars.length === 0) {
+            return res.json({ success: true, message: `${name} has no config to clear.` });
+        }
+
+        const updates = {};
+        for (const v of connector.envVars) {
+            updates[v.key] = '';
+        }
+        writeEnv(updates);
+        return res.json({ success: true, message: `${name} disconnected. ${Object.keys(updates).length} key(s) cleared.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
 });
 
 // ── Chat SSE endpoint ───────────────────────────────────────────

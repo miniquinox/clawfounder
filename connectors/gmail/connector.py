@@ -125,41 +125,74 @@ def _get_gmail_service():
     """Build and return the Gmail API service.
 
     Tries in order:
-      1. Legacy OAuth token file (~/.clawfounder/gmail_token.json)
-      2. Application Default Credentials (gcloud ADC)
+      1. OAuth token file (~/.clawfounder/gmail_token.json)
+      2. gcloud ADC file (with auto-detected quota project)
       3. Raises with a clear gcloud command to run
     """
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
-        import google.auth
     except ImportError:
         raise ImportError(
             "Gmail dependencies not installed. Run: bash connectors/gmail/install.sh"
         )
 
-    # --- Tier 1: Legacy token file (backward compat) ---
+    # --- Tier 1: ClawFounder token file ---
     if _TOKEN_FILE.exists():
-        creds = Credentials.from_authorized_user_file(str(_TOKEN_FILE), _SCOPES)
-        if creds and creds.valid:
-            return build("gmail", "v1", credentials=creds)
-        if creds and creds.expired and creds.refresh_token:
-            try:
+        try:
+            creds = Credentials.from_authorized_user_file(str(_TOKEN_FILE), _SCOPES)
+            if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
                 _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
                 _TOKEN_FILE.write_text(creds.to_json())
+            if creds and creds.valid:
                 return build("gmail", "v1", credentials=creds)
-            except Exception:
-                pass  # fall through to ADC
+        except Exception:
+            pass
 
-    # --- Tier 2: Application Default Credentials (gcloud) ---
-    try:
-        creds, _ = google.auth.default(scopes=_SCOPES)
-        creds.refresh(Request())
-        return build("gmail", "v1", credentials=creds)
-    except Exception:
-        pass
+    # --- Tier 2: gcloud ADC file ---
+    if _ADC_FILE.exists():
+        try:
+            import json as _json
+            import os as _os
+            import subprocess as _sp
+
+            # Read the ADC file
+            adc_data = _json.loads(_ADC_FILE.read_text())
+
+            # Load as user credentials
+            creds = Credentials.from_authorized_user_file(str(_ADC_FILE), _SCOPES)
+
+            # gcloud ADC tokens REQUIRE a quota project. Detect one.
+            quota_project = adc_data.get("quota_project_id")
+            if not quota_project:
+                # Try env vars
+                for var in ("GMAIL_QUOTA_PROJECT", "FIREBASE_PROJECT_ID", "GOOGLE_CLOUD_PROJECT"):
+                    quota_project = _os.environ.get(var, "").strip()
+                    if quota_project:
+                        break
+            if not quota_project:
+                # Try gcloud config
+                try:
+                    result = _sp.run(["gcloud", "config", "get-value", "project"],
+                                     capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0 and result.stdout.strip():
+                        quota_project = result.stdout.strip()
+                except Exception:
+                    pass
+
+            if quota_project:
+                creds = creds.with_quota_project(quota_project)
+
+            creds.refresh(Request())
+            if creds and creds.valid:
+                return build("gmail", "v1", credentials=creds)
+        except Exception as e:
+            # Include the error for debugging
+            _adc_error = str(e)
+        else:
+            _adc_error = "unknown"
 
     # --- Tier 3: Clear error ---
     raise ValueError(

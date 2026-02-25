@@ -87,6 +87,20 @@ function FirebaseCard({ connector, onRefresh }) {
 
   const isConnected = status?.loggedIn && status?.projectId
 
+  const handleDisconnect = async () => {
+    if (!confirm('Disconnect Firebase? This will clear the project ID.')) return
+    try {
+      await fetch('/api/connector/firebase/disconnect', { method: 'POST' })
+      await fetchStatus()
+      onRefresh()
+      setToast('Firebase disconnected')
+      setTimeout(() => setToast(null), 3000)
+    } catch {
+      setToast('Failed to disconnect')
+      setTimeout(() => setToast(null), 3000)
+    }
+  }
+
   return (
     <div className={`rounded-2xl border backdrop-blur-xl transition-all duration-300 overflow-hidden
       ${isConnected
@@ -242,6 +256,15 @@ function FirebaseCard({ connector, onRefresh }) {
               </div>
             )}
           </div>
+
+          {/* Disconnect */}
+          {isConnected && (
+            <button onClick={handleDisconnect}
+              className="w-full mt-3 py-2 rounded-xl text-xs font-medium transition-all
+                bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20">
+              Disconnect Firebase
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -300,6 +323,20 @@ function GmailCard({ connector, onRefresh }) {
   }
 
   const isConnected = status?.loggedIn
+
+  const handleDisconnect = async () => {
+    if (!confirm('Disconnect Gmail? This will revoke the token.')) return
+    try {
+      await fetch('/api/connector/gmail/disconnect', { method: 'POST' })
+      await fetchStatus()
+      onRefresh()
+      setToast('Gmail disconnected')
+      setTimeout(() => setToast(null), 3000)
+    } catch {
+      setToast('Failed to disconnect')
+      setTimeout(() => setToast(null), 3000)
+    }
+  }
 
   return (
     <div className={`rounded-2xl border backdrop-blur-xl transition-all duration-300 overflow-hidden
@@ -395,6 +432,15 @@ function GmailCard({ connector, onRefresh }) {
               </button>
             )}
           </div>
+
+          {/* Disconnect */}
+          {isConnected && (
+            <button onClick={handleDisconnect}
+              className="w-full mt-3 py-2 rounded-xl text-xs font-medium transition-all
+                bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20">
+              Disconnect Gmail
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -677,6 +723,26 @@ export default function App() {
                             disabled:opacity-30 disabled:cursor-not-allowed"
                             >
                               Save All
+                            </button>
+                          )}
+
+                          {/* Disconnect */}
+                          {connector.connected && (
+                            <button
+                              onClick={async () => {
+                                if (!confirm(`Disconnect ${CONNECTOR_META[connector.name]?.label || connector.name}? This will clear all keys.`)) return
+                                try {
+                                  await fetch(`/api/connector/${connector.name}/disconnect`, { method: 'POST' })
+                                  await fetchAll()
+                                  showToast(`${connector.name} disconnected`)
+                                } catch {
+                                  showToast('Failed to disconnect', 'error')
+                                }
+                              }}
+                              className="w-full mt-1 py-2 rounded-xl text-xs font-medium transition-all
+                                bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20"
+                            >
+                              Disconnect
                             </button>
                           )}
                         </div>
