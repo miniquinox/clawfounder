@@ -18,8 +18,11 @@ const PROJECT_ROOT = path.resolve(__dirname, '..');
 const ENV_FILE = path.join(PROJECT_ROOT, '.env');
 const CONNECTORS_DIR = path.join(PROJECT_ROOT, 'connectors');
 const FIREBASE_CONFIG = path.join(os.homedir(), '.config', 'configstore', 'firebase-tools.json');
-const GMAIL_TOKEN_FILE = path.join(os.homedir(), '.clawfounder', 'gmail_token.json');
 const ADC_FILE = path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
+
+// Separate credential files for personal Gmail vs Work Email
+const GMAIL_PERSONAL_TOKEN = path.join(os.homedir(), '.clawfounder', 'gmail_personal.json');
+const GMAIL_WORK_TOKEN = path.join(os.homedir(), '.clawfounder', 'gmail_work.json');
 
 const app = express();
 app.use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }));
@@ -108,8 +111,8 @@ function discoverConnectors() {
             });
         }
 
-        // Firebase and Gmail use Google login, not manual keys
-        const usesGoogleLogin = folder.name === 'firebase' || folder.name === 'gmail';
+        // These connectors use Google login, not manual keys
+        const usesGoogleLogin = ['firebase', 'gmail', 'work_email'].includes(folder.name);
 
         connectors.push({
             name: folder.name,
@@ -195,8 +198,9 @@ app.get('/api/connectors', (req, res) => {
             // Firebase is connected if Google login exists + project ID is set
             connected = !!(firebaseAuth?.hasToken && env['FIREBASE_PROJECT_ID']);
         } else if (c.name === 'gmail') {
-            // Gmail is connected if legacy token or gcloud ADC exists
-            connected = fs.existsSync(GMAIL_TOKEN_FILE) || fs.existsSync(ADC_FILE);
+            connected = fs.existsSync(GMAIL_PERSONAL_TOKEN);
+        } else if (c.name === 'work_email') {
+            connected = fs.existsSync(GMAIL_WORK_TOKEN);
         } else {
             connected = c.envVars
                 .filter(v => v.required)
@@ -314,11 +318,9 @@ app.post('/api/firebase/select-project', (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+// ── Email connector routes (Gmail + Work Email) ───────────────
 
-// ── Gmail-specific routes ────────────────────────────────────
-
-// Track active Gmail login process
-let gmailLoginProcess = null;
+let emailLoginProcess = null; // shared — only one login at a time
 
 const GMAIL_SCOPES = [
     'openid',
@@ -327,33 +329,125 @@ const GMAIL_SCOPES = [
     'https://www.googleapis.com/auth/gmail.send',
 ].join(',');
 
-// Check Gmail login status (legacy token OR gcloud ADC)
-app.get('/api/gmail/status', (req, res) => {
-    try {
-        // Check legacy token
-        if (fs.existsSync(GMAIL_TOKEN_FILE)) {
-            const tokenData = JSON.parse(fs.readFileSync(GMAIL_TOKEN_FILE, 'utf-8'));
-            if (tokenData.refresh_token || tokenData.token) {
-                const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
-                const email = fs.existsSync(emailFile) ? fs.readFileSync(emailFile, 'utf-8').trim() : null;
-                return res.json({ loggedIn: true, email, loginInProgress: !!gmailLoginProcess });
+// Map connector name → token file
+const EMAIL_TOKEN_FILES = {
+    gmail: GMAIL_PERSONAL_TOKEN,
+    work_email: GMAIL_WORK_TOKEN,
+};
+
+const GMAIL_CLIENT_SECRET = path.join(os.homedir(), '.clawfounder', 'gmail_client_secret.json');
+
+// Status endpoint for both Gmail and Work Email
+for (const connName of ['gmail', 'work_email']) {
+    app.get(`/api/${connName.replace('_', '-')}/status`, (req, res) => {
+        const tokenFile = EMAIL_TOKEN_FILES[connName];
+        try {
+            if (fs.existsSync(tokenFile)) {
+                const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf-8'));
+                if (tokenData.refresh_token || tokenData.token) {
+                    const email = tokenData._email || null;
+                    return res.json({ loggedIn: true, email, loginInProgress: !!emailLoginProcess });
+                }
             }
+            // For personal Gmail, also report if client_secret exists
+            if (connName === 'gmail') {
+                return res.json({
+                    loggedIn: false,
+                    email: null,
+                    loginInProgress: !!emailLoginProcess,
+                    hasClientSecret: fs.existsSync(GMAIL_CLIENT_SECRET),
+                });
+            }
+            res.json({ loggedIn: false, email: null, loginInProgress: !!emailLoginProcess });
+        } catch {
+            res.json({ loggedIn: false, email: null, loginInProgress: !!emailLoginProcess });
         }
-        // Check gcloud ADC
-        if (fs.existsSync(ADC_FILE)) {
-            return res.json({ loggedIn: true, email: null, loginInProgress: !!gmailLoginProcess });
+    });
+}
+
+// Gmail client secret upload endpoint
+app.post('/api/gmail/client-secret', (req, res) => {
+    try {
+        const { client_id, client_secret } = req.body;
+        if (!client_id || !client_secret) {
+            return res.status(400).json({ error: 'client_id and client_secret are required.' });
         }
-        res.json({ loggedIn: false, email: null, loginInProgress: !!gmailLoginProcess });
-    } catch {
-        res.json({ loggedIn: false, email: null, loginInProgress: !!gmailLoginProcess });
+
+        const secretData = {
+            installed: {
+                client_id,
+                client_secret,
+                auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+                token_uri: 'https://oauth2.googleapis.com/token',
+                redirect_uris: ['http://localhost'],
+            },
+        };
+
+        fs.mkdirSync(path.dirname(GMAIL_CLIENT_SECRET), { recursive: true });
+        fs.writeFileSync(GMAIL_CLIENT_SECRET, JSON.stringify(secretData, null, 2));
+        res.json({ success: true, message: 'Client credentials saved.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
     }
 });
 
-// Start gcloud ADC login + auto-configure quota project, Gmail API, and IAM
+// ── Personal Gmail login (Python OAuth flow) ────────────────────
 app.post('/api/gmail/login', (req, res) => {
-    if (gmailLoginProcess) {
+    if (emailLoginProcess) {
         return res.json({ status: 'already_running', message: 'Login already in progress. Complete it in your browser.' });
     }
+
+    if (!fs.existsSync(GMAIL_CLIENT_SECRET)) {
+        return res.status(400).json({
+            status: 'needs_client_secret',
+            error: 'OAuth client credentials not configured. Please set up your client ID first.',
+        });
+    }
+
+    // Run the Python OAuth script
+    const oauthScript = path.join(CONNECTORS_DIR, 'gmail', 'oauth_login.py');
+    const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python3';
+
+    const proc = spawn(pythonCmd, [oauthScript], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        cwd: PROJECT_ROOT,
+    });
+
+    emailLoginProcess = proc;
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    proc.on('close', (code) => {
+        emailLoginProcess = null;
+        console.log('[gmail] OAuth login exited with code:', code);
+        if (stderr) console.log('[gmail] stderr:', stderr.slice(-300));
+
+        if (code === 0) {
+            try {
+                const result = JSON.parse(stdout);
+                console.log(`[gmail] ✅ Logged in as ${result.email || 'unknown'}`);
+            } catch {
+                console.log('[gmail] ✅ Login completed (could not parse output)');
+            }
+        } else {
+            console.log('[gmail] ❌ Login failed:', stdout.slice(-300));
+        }
+    });
+
+    res.json({ status: 'started', message: 'Browser should open for Google login. Complete the login there.' });
+});
+
+// ── Work Email login (gcloud ADC flow) ──────────────────────────
+app.post('/api/work-email/login', (req, res) => {
+    if (emailLoginProcess) {
+        return res.json({ status: 'already_running', message: 'Login already in progress. Complete it in your browser.' });
+    }
+
+    const tokenFile = EMAIL_TOKEN_FILES.work_email;
 
     const proc = spawn('gcloud', [
         'auth', 'application-default', 'login',
@@ -363,97 +457,78 @@ app.post('/api/gmail/login', (req, res) => {
         shell: true,
     });
 
-    gmailLoginProcess = proc;
+    emailLoginProcess = proc;
     let output = '';
 
     proc.stdout.on('data', (data) => { output += data.toString(); });
     proc.stderr.on('data', (data) => { output += data.toString(); });
 
     proc.on('close', (code) => {
-        gmailLoginProcess = null;
-        console.log('[gmail] ADC login exited with code:', code);
+        emailLoginProcess = null;
+        console.log('[work_email] ADC login exited with code:', code);
 
         if (code !== 0) {
-            console.log('[gmail] Login failed:', output.slice(-200));
+            console.log('[work_email] Login failed:', output.slice(-200));
             return;
         }
 
-        // ── Post-login automation ──────────────────────────────
-        console.log('[gmail] Login succeeded. Running post-login setup...');
+        console.log('[work_email] Login succeeded. Running post-login setup...');
 
         const { execSync } = require('child_process');
         const run = (cmd) => {
             try {
                 return execSync(cmd, { encoding: 'utf-8', timeout: 30000 }).trim();
             } catch (e) {
-                console.log(`[gmail] Command failed: ${cmd}`, e.message?.slice(0, 200));
+                console.log(`[work_email] Command failed: ${cmd}`, e.message?.slice(0, 200));
                 return null;
             }
         };
 
-        // 1. Detect the user's GCP project
+        // 1. Detect quota project
         let quotaProject = null;
         const env = readEnv();
-
-        // Prefer FIREBASE_PROJECT_ID if set (user already configured it)
-        if (env['FIREBASE_PROJECT_ID']) {
-            quotaProject = env['FIREBASE_PROJECT_ID'];
-        }
-        // Otherwise, try gcloud config
-        if (!quotaProject) {
-            quotaProject = run('gcloud config get-value project 2>/dev/null');
-        }
-        // Last resort: first project in list
+        if (env['FIREBASE_PROJECT_ID']) quotaProject = env['FIREBASE_PROJECT_ID'];
+        if (!quotaProject) quotaProject = run('gcloud config get-value project 2>/dev/null');
         if (!quotaProject) {
             const first = run('gcloud projects list --format="value(projectId)" --limit=1 2>/dev/null');
             if (first) quotaProject = first;
         }
 
-        if (!quotaProject) {
-            console.log('[gmail] ⚠ No GCP project found. Gmail may not work without a quota project.');
-            return;
+        // 2. Enable Gmail API
+        if (quotaProject) {
+            console.log(`[work_email] Enabling Gmail API on ${quotaProject}...`);
+            run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
         }
-        console.log(`[gmail] Using quota project: ${quotaProject}`);
 
-        // 2. Enable Gmail API on the project
-        console.log(`[gmail] Enabling Gmail API on ${quotaProject}...`);
-        run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
-
-        // 3. Detect the logged-in email from the ADC file
+        // 3. Detect email
         let userEmail = null;
         try {
-            // ADC doesn't store email, but we can get it from gcloud auth
             const accounts = run('gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null');
             if (accounts) userEmail = accounts.split('\n')[0].trim();
         } catch { /* best effort */ }
 
-        // 4. Grant serviceUsageConsumer role (idempotent)
-        if (userEmail) {
-            console.log(`[gmail] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
+        // 4. Grant serviceUsageConsumer
+        if (userEmail && quotaProject) {
+            console.log(`[work_email] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
             run(`gcloud projects add-iam-policy-binding ${quotaProject} --member="user:${userEmail}" --role="roles/serviceusage.serviceUsageConsumer" --condition=None --quiet 2>/dev/null`);
-
-            // Save email for display
-            const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
-            try {
-                fs.mkdirSync(path.dirname(emailFile), { recursive: true });
-                fs.writeFileSync(emailFile, userEmail);
-            } catch { /* best effort */ }
         }
 
-        // 5. Set quota_project_id in the ADC file
+        // 5. Copy ADC → token file
         try {
             const adcData = JSON.parse(fs.readFileSync(ADC_FILE, 'utf-8'));
-            adcData.quota_project_id = quotaProject;
-            fs.writeFileSync(ADC_FILE, JSON.stringify(adcData, null, 2));
-            console.log(`[gmail] ✅ Set quota_project_id=${quotaProject} in ADC file`);
+            if (quotaProject) adcData.quota_project_id = quotaProject;
+            if (userEmail) adcData._email = userEmail;
+            fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+            fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
+            console.log(`[work_email] ✅ Saved credentials to ${tokenFile}`);
         } catch (e) {
-            console.log('[gmail] ⚠ Could not update ADC file:', e.message);
+            console.log(`[work_email] ⚠ Could not save token file:`, e.message);
         }
 
-        console.log('[gmail] ✅ Post-login setup complete!');
+        console.log('[work_email] ✅ Post-login setup complete!');
     });
 
-    res.json({ status: 'started', message: 'Browser should open for Google login. Complete the login there.' });
+    res.json({ status: 'started', message: 'Browser should open for Work Email login. Complete the login there.' });
 });
 
 // ── Disconnect endpoint ─────────────────────────────────────────
@@ -470,21 +545,13 @@ app.post('/api/connector/:name/disconnect', (req, res) => {
             return res.json({ success: true, message: 'Firebase disconnected. Project ID cleared.' });
         }
 
-        if (name === 'gmail') {
-            // Remove legacy token file
-            if (fs.existsSync(GMAIL_TOKEN_FILE)) {
-                fs.unlinkSync(GMAIL_TOKEN_FILE);
+        if (name === 'gmail' || name === 'work_email') {
+            const tokenFile = EMAIL_TOKEN_FILES[name];
+            if (tokenFile && fs.existsSync(tokenFile)) {
+                fs.unlinkSync(tokenFile);
             }
-            // Remove email cache
-            const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
-            if (fs.existsSync(emailFile)) {
-                fs.unlinkSync(emailFile);
-            }
-            // Revoke ADC (gcloud application-default credentials)
-            try {
-                spawn('gcloud', ['auth', 'application-default', 'revoke', '--quiet'], { shell: true });
-            } catch { /* best effort */ }
-            return res.json({ success: true, message: 'Gmail disconnected. Token revoked.' });
+            const label = name === 'gmail' ? 'Gmail' : 'Work Email';
+            return res.json({ success: true, message: `${label} disconnected. Token removed.` });
         }
 
         // Generic connector: clear all env vars from .env

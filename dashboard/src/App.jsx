@@ -3,6 +3,7 @@ import ChatView from './ChatView'
 
 const CONNECTOR_META = {
   gmail: { emoji: '📧', label: 'Gmail', color: '#ea4335' },
+  work_email: { emoji: '💼', label: 'Work Email', color: '#4285f4' },
   telegram: { emoji: '💬', label: 'Telegram', color: '#26a5e4' },
   github: { emoji: '🐙', label: 'GitHub', color: '#8b5cf6' },
   supabase: { emoji: '⚡', label: 'Supabase', color: '#3ecf8e' },
@@ -271,7 +272,99 @@ function FirebaseCard({ connector, onRefresh }) {
   )
 }
 
-function GmailCard({ connector, onRefresh }) {
+function GmailClientSetup({ onSaved }) {
+  const [clientId, setClientId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState(null)
+  const [done, setDone] = useState(false)
+
+  const handleSave = async () => {
+    if (!clientId.trim() || !clientSecret.trim()) {
+      setError('Both Client ID and Client Secret are required.')
+      return
+    }
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/gmail/client-secret', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim() }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setDone(true)
+      onSaved?.()
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  if (done) {
+    return (
+      <div className="bg-success/10 border border-success/20 rounded-xl px-4 py-3 text-xs text-green-400 flex items-center gap-2">
+        <span className="w-5 h-5 rounded-full bg-success/20 text-green-400 flex items-center justify-center text-[10px] font-bold">✓</span>
+        OAuth credentials saved. Click "Sign in with Google" below.
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        <span className="w-6 h-6 rounded-full text-[11px] font-bold flex items-center justify-center bg-accent/20 text-accent-light">1</span>
+        <span className="text-sm font-medium text-white">Set up OAuth credentials</span>
+        <span className="text-[10px] text-claw-500 font-medium">(one-time)</span>
+      </div>
+
+      <div className="ml-8 space-y-3">
+        <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 text-xs text-blue-300 space-y-1.5">
+          <div className="font-semibold text-blue-200">Create a Google OAuth App (~2 min)</div>
+          <ol className="list-decimal ml-4 space-y-1">
+            <li>Go to <a href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" rel="noopener"
+              className="underline hover:text-blue-100">console.cloud.google.com → OAuth consent screen</a></li>
+            <li>Choose <strong>External</strong> → Create → Fill in app name (e.g. "ClawFounder") and your email</li>
+            <li>Add scopes: <code className="bg-white/10 px-1 rounded">gmail.readonly</code> and <code className="bg-white/10 px-1 rounded">gmail.send</code></li>
+            <li>Under "Test users", add <strong>your personal Gmail address</strong></li>
+            <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener"
+              className="underline hover:text-blue-100">Credentials</a> → Create → <strong>OAuth 2.0 Client ID</strong> → <strong>Desktop app</strong></li>
+            <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong> below</li>
+          </ol>
+        </div>
+
+        <div className="space-y-2">
+          <input
+            type="text"
+            value={clientId}
+            onChange={(e) => setClientId(e.target.value)}
+            placeholder="Client ID (e.g. 12345...apps.googleusercontent.com)"
+            className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
+              placeholder-claw-500 focus:outline-none focus:border-accent/50"
+          />
+          <input
+            type="password"
+            value={clientSecret}
+            onChange={(e) => setClientSecret(e.target.value)}
+            placeholder="Client Secret"
+            className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
+              placeholder-claw-500 focus:outline-none focus:border-accent/50"
+          />
+          {error && <p className="text-xs text-red-400">{error}</p>}
+          <button onClick={handleSave} disabled={saving}
+            className="px-4 py-2 rounded-lg text-xs font-medium transition-all
+              bg-accent/20 text-accent-light hover:bg-accent/30 disabled:opacity-50">
+            {saving ? 'Saving...' : 'Save Credentials'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
   const [status, setStatus] = useState(null)
   const [loadingLogin, setLoadingLogin] = useState(false)
   const [expanded, setExpanded] = useState(false)
@@ -279,7 +372,10 @@ function GmailCard({ connector, onRefresh }) {
   const pollRef = useRef(null)
   const timeoutRef = useRef(null)
 
-  const meta = CONNECTOR_META.gmail
+  const meta = CONNECTOR_META[connectorName]
+  const apiPath = connectorName.replace('_', '-') // gmail or work-email
+  const label = connectorName === 'gmail' ? 'Gmail' : 'Work Email'
+  const isWorkEmail = connectorName === 'work_email'
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null }
@@ -290,18 +386,18 @@ function GmailCard({ connector, onRefresh }) {
   useEffect(() => () => stopPolling(), [stopPolling])
 
   const fetchStatus = useCallback(async () => {
-    const res = await fetch('/api/gmail/status')
+    const res = await fetch(`/api/${apiPath}/status`)
     const data = await res.json()
     setStatus(data)
     return data
-  }, [])
+  }, [apiPath])
 
   useEffect(() => { fetchStatus() }, [fetchStatus])
 
   const handleLogin = async () => {
     setLoadingLogin(true)
     try {
-      await fetch('/api/gmail/login', { method: 'POST' })
+      await fetch(`/api/${apiPath}/login`, { method: 'POST' })
 
       // Poll for login completion (gcloud opens browser itself)
       stopPolling()
@@ -311,7 +407,7 @@ function GmailCard({ connector, onRefresh }) {
           stopPolling()
           setLoadingLogin(false)
           onRefresh()
-          setToast('Gmail connected!')
+          setToast(`${label} connected!`)
           setTimeout(() => setToast(null), 3000)
         }
       }, 2000)
@@ -325,12 +421,12 @@ function GmailCard({ connector, onRefresh }) {
   const isConnected = status?.loggedIn
 
   const handleDisconnect = async () => {
-    if (!confirm('Disconnect Gmail? This will revoke the token.')) return
+    if (!confirm(`Disconnect ${label}? This will remove the token.`)) return
     try {
-      await fetch('/api/connector/gmail/disconnect', { method: 'POST' })
+      await fetch(`/api/connector/${connectorName}/disconnect`, { method: 'POST' })
       await fetchStatus()
       onRefresh()
-      setToast('Gmail disconnected')
+      setToast(`${label} disconnected`)
       setTimeout(() => setToast(null), 3000)
     } catch {
       setToast('Failed to disconnect')
@@ -347,7 +443,7 @@ function GmailCard({ connector, onRefresh }) {
     >
       {toast && (
         <div className={`mx-5 mt-3 px-4 py-2 rounded-lg text-xs font-medium
-          ${toast.startsWith('Gmail connected')
+          ${toast.includes('connected!')
             ? 'bg-success/15 border border-success/30 text-green-400'
             : 'bg-danger/15 border border-danger/30 text-red-400'}`}>
           {toast}
@@ -386,11 +482,32 @@ function GmailCard({ connector, onRefresh }) {
       {/* Expanded content */}
       {expanded && (
         <div className="px-5 pb-5 space-y-4 border-t border-white/5 pt-4">
+
+          {/* Workspace admin notice (work email only) */}
+          {isWorkEmail && !isConnected && (
+            <div className="bg-amber-500/10 border border-amber-500/20 rounded-xl px-4 py-3 text-xs text-amber-300 space-y-1.5">
+              <div className="font-semibold text-amber-200">⚠ Google Workspace Admin Required (one-time)</div>
+              <ol className="list-decimal ml-4 space-y-0.5">
+                <li>Go to <a href="https://admin.google.com/ac/owl/list?tab=configuredApps" target="_blank" rel="noopener"
+                  className="underline hover:text-amber-100">admin.google.com → API Controls</a></li>
+                <li>Click <strong>"Configure New App"</strong></li>
+                <li>Search <strong>"Google Auth Library"</strong></li>
+                <li>Allow for <strong>all company users</strong> → Choose <strong>Trusted</strong></li>
+              </ol>
+            </div>
+          )}
+
+          {/* Personal Gmail: OAuth client setup (Step 1) */}
+          {!isWorkEmail && !isConnected && !status?.hasClientSecret && (
+            <GmailClientSetup onSaved={() => fetchStatus()} />
+          )}
+
+          {/* Step 2: Sign in button */}
           <div>
             <div className="flex items-center gap-2 mb-2">
               <span className={`w-6 h-6 rounded-full text-[11px] font-bold flex items-center justify-center
                 ${isConnected ? 'bg-success/20 text-green-400' : 'bg-accent/20 text-accent-light'}`}>
-                {isConnected ? '\u2713' : '1'}
+                {isConnected ? '\u2713' : (!isWorkEmail && !status?.hasClientSecret ? '2' : '1')}
               </span>
               <span className="text-sm font-medium text-white">Sign in with Google</span>
             </div>
@@ -402,13 +519,16 @@ function GmailCard({ connector, onRefresh }) {
                   {status.email || 'Authenticated'}
                 </div>
                 <p className="text-[11px] text-claw-500">
-                  Read, search, and send emails. Token saved locally.
+                  {isWorkEmail
+                    ? 'Access your work email. Credentials saved locally.'
+                    : 'Read, search, and send emails. Token saved locally.'
+                  }
                 </p>
               </div>
             ) : (
               <button
                 onClick={handleLogin}
-                disabled={loadingLogin}
+                disabled={loadingLogin || (!isWorkEmail && !status?.hasClientSecret)}
                 className="ml-8 flex items-center gap-3 px-5 py-2.5 rounded-xl text-sm font-medium transition-all
                   bg-white/[0.08] hover:bg-white/[0.12] border border-white/10 hover:border-white/20
                   text-white disabled:opacity-50"
@@ -438,7 +558,7 @@ function GmailCard({ connector, onRefresh }) {
             <button onClick={handleDisconnect}
               className="w-full mt-3 py-2 rounded-xl text-xs font-medium transition-all
                 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20">
-              Disconnect Gmail
+              Disconnect {label}
             </button>
           )}
         </div>
@@ -637,9 +757,9 @@ export default function App() {
                     return <FirebaseCard key="firebase" connector={connector} onRefresh={fetchAll} />
                   }
 
-                  // Gmail gets its own Google login card
-                  if (connector.name === 'gmail') {
-                    return <GmailCard key="gmail" connector={connector} onRefresh={fetchAll} />
+                  // Gmail and Work Email get the shared EmailCard
+                  if (connector.name === 'gmail' || connector.name === 'work_email') {
+                    return <EmailCard key={connector.name} connector={connector} onRefresh={fetchAll} connectorName={connector.name} />
                   }
 
                   const meta = CONNECTOR_META[connector.name] || { emoji: '🔗', label: connector.name, color: '#7f56d9' }

@@ -1,51 +1,30 @@
-# Gmail Connector
+# Gmail (Personal) — Email Connector
 
-Connects ClawFounder to your Gmail account using the Gmail API (Google's official Python client).
+Connect your personal @gmail.com account to ClawFounder.
 
-## What It Does
+## Prerequisites
 
-- Read unread emails
-- Search emails by query
-- Read full email body
-- Send emails
+**One-time OAuth Setup (~2 minutes):**
+1. Go to [console.cloud.google.com → OAuth consent screen](https://console.cloud.google.com/apis/credentials/consent)
+2. Choose **External** → Create → Fill in app name (e.g. "ClawFounder") and your email
+3. Add scopes: `gmail.readonly` and `gmail.send`
+4. Under "Test users", add **your personal Gmail address**
+5. Go to [Credentials](https://console.cloud.google.com/apis/credentials) → Create → **OAuth 2.0 Client ID** → **Desktop app**
+6. Copy the **Client ID** and **Client Secret** into the dashboard
 
-## Authentication
-
-Gmail uses **Application Default Credentials** (ADC) via the gcloud CLI — no Google Cloud project or credentials file needed.
-
-### Quick Setup
-
-```bash
-gcloud auth application-default login \
-  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send
-```
-
-This opens a browser window to authorize access. After that, gcloud saves credentials locally and the connector picks them up automatically.
-
-You can also click **Sign in with Google** on the Gmail card in the ClawFounder dashboard — it runs the same command for you.
-
-> **Note:** If you previously used OAuth with a `credentials.json` file, the existing token at `~/.clawfounder/gmail_token.json` will continue to work. No migration needed.
+This is only needed once. After that, just click "Sign in with Google".
 
 ## Setup
 
-```bash
-cd connectors/gmail
-bash install.sh
-```
+1. Enter your OAuth Client ID and Client Secret in the Gmail card
+2. Click **"Sign in with Google"**
+3. Authorize in the browser
 
-## Available Tools
+## Tools
 
 | Tool | Description |
-|---|---|
-| `gmail_get_unread` | Fetch unread emails (returns sender, subject, date, snippet) |
-| `gmail_search` | Search emails with a Gmail query (e.g., "from:boss subject:urgent") |
-| `gmail_read_email` | Read the full body of an email by message ID |
+|------|-------------|
+| `gmail_get_unread` | Fetch unread emails |
+| `gmail_search` | Search emails with Gmail query syntax |
+| `gmail_read_email` | Read full email body by ID |
 | `gmail_send` | Send an email |
-
-## Testing
-
-```bash
-python3 -m pytest connectors/gmail/test_connector.py -v
-python3 -m agent.runner --provider gemini
-# Ask: "Do I have any unread emails?"
-```
