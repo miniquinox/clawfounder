@@ -35,26 +35,55 @@ That's it. Five files. Copy the template, fill them in, submit a PR.
 git clone https://github.com/miniquinox/clawfounder.git
 cd clawfounder
 
-# 2. Create a virtual environment & install
-python3 -m venv venv
+# 2. Install everything (Python, npm, .env)
+bash install.sh
+
+# 3. Launch the dashboard
+cd dashboard && npm run dev
+# Open http://localhost:5173
+```
+
+That's it. The install script handles venv creation, Python deps, npm deps, and `.env` setup.
+
+### Doctor
+
+Something not working? Run the diagnostic:
+
+```bash
+bash doctor.sh
+```
+
+It checks Python version, Node.js, venv packages, dashboard deps, API keys, Firebase CLI auth, port availability — and tells you exactly what to fix.
+
+### CLI Mode (alternative)
+
+If you prefer the terminal instead of the dashboard:
+
+```bash
 source venv/bin/activate
-pip install -r requirements.txt
-
-# 3. Set up your keys
-cp .env.example .env
-# Edit .env with your API keys
-
-# 4. Install a connector (e.g., Gmail)
-cd connectors/gmail && bash install.sh && cd ../..
-
-# 5. Talk to it
 python -m agent.runner --provider gemini
 # Try: "Do I have any unread emails?"
 ```
 
-> **Note:** Always activate the venv first (`source venv/bin/activate`) before running commands.
-
 Pick your LLM provider: `gemini`, `openai`, or `claude`.
+
+---
+
+## Dashboard
+
+The web dashboard at `http://localhost:5173` gives you:
+
+- **⚙️ Connect** — Configure API keys and authenticate with services (Gmail, GitHub, Firebase, etc.)
+- **💬 Chat** — Talk to your AI agent in a rich chat interface with:
+  - Real-time SSE streaming
+  - Markdown-rendered responses
+  - Expandable tool call cards showing arguments and results
+  - Provider selector (Gemini, OpenAI, Claude)
+  - Multi-turn conversation history
+
+The dashboard runs two servers:
+- **Vite** (port 5173) — Frontend dev server
+- **Express** (port 3001) — API backend that spawns the Python chat agent
 
 ---
 
@@ -81,6 +110,16 @@ clawfounder/
 │   ├── supabase/
 │   ├── firebase/
 │   └── yahoo_finance/
+│
+├── dashboard/               ← Web UI
+│   ├── server.js            ← Express API + SSE streaming
+│   ├── chat_agent.py        ← Python agent with agentic loop
+│   ├── src/
+│   │   ├── App.jsx          ← Main app with tabs (Connect / Chat)
+│   │   ├── ChatView.jsx     ← Chat interface with markdown
+│   │   └── index.css        ← Styles
+│   ├── vite.config.js       ← Vite + proxy config
+│   └── package.json
 │
 └── tests/                   ← Validation
     ├── validate_connector.py  ← Checks connector structure
@@ -187,7 +226,7 @@ We're building this in the open. Every connector the community adds makes ClawFo
 
 | Provider | Status | API Key Env Var |
 |---|---|---|
-| Google Gemini | ✅ Ready | `GEMINI_API_KEY` |
+| Google Gemini | ✅ Ready (`gemini-3-flash-preview` + thinking) | `GEMINI_API_KEY` |
 | OpenAI (GPT-4) | ✅ Ready | `OPENAI_API_KEY` |
 | Anthropic Claude | ✅ Ready | `ANTHROPIC_API_KEY` |
 

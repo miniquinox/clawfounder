@@ -1,0 +1,28 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-claw-900: #0a0a14;
+  --color-claw-800: #12121f;
+  --color-claw-700: #1a1a2e;
+  --color-claw-600: #252540;
+  --color-claw-500: #363659;
+  --color-claw-400: #5a5a8a;
+  --color-claw-300: #8888bb;
+  --color-claw-200: #b0b0dd;
+  --color-claw-100: #d8d8f0;
+  --color-accent: #7f56d9;
+  --color-accent-light: #a78bfa;
+  --color-accent-glow: #7f56d940;
+  --color-success: #22c55e;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+}
+
+body {
+  margin: 0;
+  background: var(--color-claw-900);
+  color: #e2e2f0;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+}
