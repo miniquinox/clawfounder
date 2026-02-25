@@ -2,8 +2,9 @@
 Firebase connector — Read/write Firestore documents.
 
 Authentication priority:
-  1. FIREBASE_REFRESH_TOKEN env var (from dashboard login)
-  2. Firebase CLI stored token (~/.config/configstore/firebase-tools.json)
+  1. FIREBASE_ACCESS_TOKEN env var (for testing / CI)
+  2. gcloud auth print-access-token (if gcloud CLI is installed)
+  3. Google Application Default Credentials (ADC)
 
 Project detection priority:
   1. FIREBASE_PROJECT_ID env var
@@ -14,9 +15,6 @@ Project detection priority:
 import os
 import json
 
-# Firebase CLI OAuth client credentials (public, embedded in firebase-tools source)
-_FIREBASE_CLIENT_ID = "***REDACTED_CLIENT_ID***"
-_FIREBASE_CLIENT_SECRET = "***REDACTED_CLIENT_SECRET***"
 
 TOOLS = [
     {
@@ -122,44 +120,45 @@ TOOLS = [
 
 
 def _get_access_token():
-    """Get a fresh access token using the Firebase CLI refresh token."""
-    import requests
+    """Get a Google access token. No hardcoded credentials."""
+    import subprocess
 
-    refresh_token = os.environ.get("FIREBASE_REFRESH_TOKEN")
+    # 1. Explicit token from env (for CI/testing)
+    token = os.environ.get("FIREBASE_ACCESS_TOKEN", "").strip()
+    if token:
+        return token
 
-    if not refresh_token:
-        # Try reading from Firebase CLI config directly
-        config_path = os.path.join(
-            os.path.expanduser("~"), ".config", "configstore", "firebase-tools.json"
+    # 2. gcloud CLI (most common for local dev)
+    try:
+        result = subprocess.run(
+            ["gcloud", "auth", "print-access-token"],
+            capture_output=True, text=True, timeout=10,
         )
-        if os.path.exists(config_path):
-            try:
-                with open(config_path) as f:
-                    config = json.load(f)
-                refresh_token = config.get("tokens", {}).get("refresh_token")
-            except Exception:
-                pass
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
 
-    if not refresh_token:
-        raise ValueError(
-            "Not logged in. Use the dashboard to 'Login with Google' for Firebase, "
-            "or run: npx firebase-tools login"
+    # 3. Application Default Credentials via google-auth
+    try:
+        import google.auth
+        import google.auth.transport.requests
+
+        creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
+        creds.refresh(google.auth.transport.requests.Request())
+        if creds.token:
+            return creds.token
+    except Exception:
+        pass
 
-    resp = requests.post(
-        "https://oauth2.googleapis.com/token",
-        data={
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": _FIREBASE_CLIENT_ID,
-            "client_secret": _FIREBASE_CLIENT_SECRET,
-        },
+    raise ValueError(
+        "No auth found. Options:\n"
+        "  1. Install gcloud CLI and run: gcloud auth login\n"
+        "  2. Set FIREBASE_ACCESS_TOKEN env var\n"
+        "  3. Set up Application Default Credentials: gcloud auth application-default login"
     )
-
-    if resp.status_code != 200:
-        raise ValueError(f"Token refresh failed: {resp.text}")
-
-    return resp.json()["access_token"]
 
 
 def _get_project_id(override=None):
@@ -200,6 +199,32 @@ def _get_project_id(override=None):
         pass
 
     raise ValueError("No Firebase project ID found. Set FIREBASE_PROJECT_ID in .env or pass project_id.")
+
+
+def _get_quota_project():
+    """Get the gcloud quota project for API billing attribution."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["gcloud", "config", "get-value", "project"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _auth_headers(project_id=None):
+    """Build auth headers including quota project."""
+    token = _get_access_token()
+    headers = {"Authorization": f"Bearer {token}"}
+    # Firebase Management API requires a quota project header with user credentials
+    quota_project = project_id or _get_quota_project()
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
+    return headers
 
 
 def _firestore_url(project_id, database="(default)", path=""):
@@ -269,10 +294,10 @@ def _list_projects() -> str:
     """List all Firebase projects via the Firebase Management API."""
     import requests
     try:
-        token = _get_access_token()
+        headers = _auth_headers()
         resp = requests.get(
             "https://firebase.googleapis.com/v1beta1/projects?pageSize=50",
-            headers={"Authorization": f"Bearer {token}"},
+            headers=headers,
         )
 
         if resp.status_code != 200:
@@ -299,15 +324,12 @@ def _list_collections(project_id=None, database="(default)") -> str:
     """List top-level Firestore collections using listCollectionIds."""
     import requests
     try:
-        token = _get_access_token()
         pid = _get_project_id(project_id)
         url = f"https://firestore.googleapis.com/v1/projects/{pid}/databases/{database}/documents:listCollectionIds"
+        headers = _auth_headers(pid)
+        headers["Content-Type"] = "application/json"
 
-        resp = requests.post(
-            url,
-            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-            json={},
-        )
+        resp = requests.post(url, headers=headers, json={})
 
         if resp.status_code != 200:
             error_text = resp.text[:200]
@@ -329,11 +351,10 @@ def _list_collections(project_id=None, database="(default)") -> str:
 def _get_document(path: str, project_id=None, database="(default)") -> str:
     import requests
     try:
-        token = _get_access_token()
         pid = _get_project_id(project_id)
         url = _firestore_url(pid, database, path)
 
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+        resp = requests.get(url, headers=_auth_headers(pid))
 
         if resp.status_code == 404:
             return f"Document not found: {path}"
@@ -349,14 +370,13 @@ def _get_document(path: str, project_id=None, database="(default)") -> str:
 def _set_document(path: str, data: dict, project_id=None, database="(default)") -> str:
     import requests
     try:
-        token = _get_access_token()
         pid = _get_project_id(project_id)
         url = _firestore_url(pid, database, path)
 
         fields = {k: _to_firestore_value(v) for k, v in data.items()}
         body = {"fields": fields}
 
-        resp = requests.patch(url, headers={"Authorization": f"Bearer {token}"}, json=body)
+        resp = requests.patch(url, headers=_auth_headers(pid), json=body)
 
         if resp.status_code not in (200, 201):
             return f"Firestore error ({resp.status_code}): {resp.text[:200]}"
@@ -369,13 +389,12 @@ def _set_document(path: str, data: dict, project_id=None, database="(default)") 
 def _list_collection(collection: str, project_id=None, database="(default)", limit: int = 20) -> str:
     import requests
     try:
-        token = _get_access_token()
         pid = _get_project_id(project_id)
         url = _firestore_url(pid, database, collection)
 
         resp = requests.get(
             url,
-            headers={"Authorization": f"Bearer {token}"},
+            headers=_auth_headers(pid),
             params={"pageSize": limit},
         )
 
