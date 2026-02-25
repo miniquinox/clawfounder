@@ -109,19 +109,21 @@ def run_agentic_test(connector_name, test_config, verbose=True):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_CLOUD_API_KEY", "")
 
     # Check required env vars
     for var in test_config["required_env"]:
         val = os.environ.get(var)
         if not val:
-            # Firebase: check alternative auth
-            if connector_name == "firebase" and var in ("FIREBASE_CREDENTIALS_FILE",):
-                if os.environ.get("FIREBASE_REFRESH_TOKEN"):
-                    continue
-                config_path = os.path.join(os.path.expanduser("~"), ".config", "configstore", "firebase-tools.json")
-                if os.path.exists(config_path):
-                    continue
+            # Firebase: check alternative auth (gcloud)
+            if connector_name == "firebase" and var == "FIREBASE_PROJECT_ID":
+                import subprocess
+                try:
+                    r = subprocess.run(["gcloud", "config", "get-value", "project"], capture_output=True, text=True, timeout=5)
+                    if r.returncode == 0 and r.stdout.strip():
+                        continue
+                except Exception:
+                    pass
             return {"status": "skip", "reason": f"{var} not set"}
 
     # Load connector
@@ -133,52 +135,15 @@ def run_agentic_test(connector_name, test_config, verbose=True):
     tools = module.TOOLS
     handle_fn = module.handle
 
-    # Set up Gemini client — try multiple auth methods
-    client = None
-    model_id = "gemini-2.0-flash"
+    # Set up Gemini client
+    if not api_key:
+        return {"status": "skip", "reason": "No Gemini auth available. Set GEMINI_API_KEY in .env"}
 
-    # Method 1: Standard API key (AIza...)
-    if api_key and api_key.startswith("AIza"):
-        client = genai.Client(api_key=api_key)
-        if verbose:
-            print("  🔑 Auth: API key")
+    client = genai.Client(api_key=api_key)
+    model_id = "gemini-3-flash-preview"
 
-    # Method 2: Vertex AI with ADC (gcloud auth application-default login)
-    if not client:
-        # Detect GCP project from gcloud config or env
-        gcp_project = None
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["gcloud", "config", "get-value", "project"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                gcp_project = result.stdout.strip()
-        except Exception:
-            pass
-
-        if not gcp_project:
-            for env_var in ("GOOGLE_CLOUD_PROJECT", "GCLOUD_PROJECT"):
-                val = os.environ.get(env_var, "")
-                if val and not val.startswith("#"):
-                    gcp_project = val
-                    break
-
-        if gcp_project:
-            try:
-                client = genai.Client(
-                    vertexai=True,
-                    project=gcp_project,
-                    location="us-central1",
-                )
-                if verbose:
-                    print(f"  🔑 Auth: Vertex AI ({gcp_project})")
-            except Exception:
-                pass
-
-    if not client:
-        return {"status": "skip", "reason": "No Gemini auth available. Set GEMINI_API_KEY (AIza...) or run 'gcloud auth application-default login'"}
+    if verbose:
+        print(f"  🔑 Auth: API key → {model_id}")
 
     gemini_tool = _build_tool_schema(tools)
 
@@ -200,6 +165,16 @@ def run_agentic_test(connector_name, test_config, verbose=True):
         "When you have enough information, give a clear final answer."
     )
 
+    # Generation config with thinking
+    config = types.GenerateContentConfig(
+        tools=[gemini_tool] if gemini_tool else [],
+        system_instruction=system_instruction,
+        temperature=1,
+        top_p=0.95,
+        max_output_tokens=65535,
+        thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+    )
+
     max_turns = 10
     turn = 0
     all_tool_calls = []
@@ -212,10 +187,7 @@ def run_agentic_test(connector_name, test_config, verbose=True):
             response = client.models.generate_content(
                 model=model_id,
                 contents=contents,
-                config=types.GenerateContentConfig(
-                    tools=[gemini_tool],
-                    system_instruction=system_instruction,
-                ),
+                config=config,
             )
         except Exception as e:
             err = str(e)
@@ -232,6 +204,10 @@ def run_agentic_test(connector_name, test_config, verbose=True):
             break
 
         for part in response.candidates[0].content.parts:
+            # Skip thinking parts
+            if hasattr(part, 'thought') and part.thought:
+                continue
+
             if part.function_call:
                 has_function_calls = True
                 fc = part.function_call
