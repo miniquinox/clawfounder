@@ -5,6 +5,12 @@ Supabase connector — Query tables, insert data, and run SQL.
 import os
 import json
 
+
+def is_connected() -> bool:
+    """Return True if Supabase credentials are set."""
+    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_KEY"))
+
+
 TOOLS = [
     {
         "name": "supabase_query",
@@ -52,7 +58,7 @@ TOOLS = [
     },
     {
         "name": "supabase_sql",
-        "description": "Run a read-only SQL query on Supabase. Only SELECT statements are allowed.",
+        "description": "Run a read-only SQL query on Supabase (requires a custom RPC function — prefer supabase_query for most use cases). Only SELECT statements are allowed.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -97,7 +103,10 @@ def _query(table: str, select: str = "*", limit: int = 20, filters: str = None) 
 
 def _insert(table: str, data: str) -> str:
     client = _get_client()
-    row = json.loads(data)
+    try:
+        row = json.loads(data) if isinstance(data, str) else data
+    except (json.JSONDecodeError, TypeError) as e:
+        return f"Invalid JSON data: {e}. Pass a valid JSON object like '{{\"name\": \"John\"}}'"
     result = client.table(table).insert(row).execute()
     return f"Inserted {len(result.data)} row(s) into '{table}'"
 

@@ -19,9 +19,10 @@ const ENV_FILE = path.join(PROJECT_ROOT, '.env');
 const CONNECTORS_DIR = path.join(PROJECT_ROOT, 'connectors');
 const FIREBASE_CONFIG = path.join(os.homedir(), '.config', 'configstore', 'firebase-tools.json');
 const GMAIL_TOKEN_FILE = path.join(os.homedir(), '.clawfounder', 'gmail_token.json');
+const ADC_FILE = path.join(os.homedir(), '.config', 'gcloud', 'application_default_credentials.json');
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }));
 app.use(express.json());
 
 // ── Parse .env file ─────────────────────────────────────────────
@@ -35,8 +36,15 @@ function readEnv() {
         const eqIndex = trimmed.indexOf('=');
         if (eqIndex === -1) continue;
         const key = trimmed.slice(0, eqIndex).trim();
-        const value = trimmed.slice(eqIndex + 1).trim();
-        env[key] = value;
+        let value = trimmed.slice(eqIndex + 1).trim();
+        // Strip inline comments (unquoted # preceded by whitespace)
+        if (!value.startsWith('"') && !value.startsWith("'")) {
+            const hashIdx = value.indexOf(' #');
+            if (hashIdx !== -1) value = value.slice(0, hashIdx).trim();
+            // Also handle value that IS just a comment (e.g., "= # comment")
+            if (value.startsWith('#')) value = '';
+        }
+        if (value) env[key] = value;
     }
     return env;
 }
@@ -157,7 +165,11 @@ app.get('/api/config', (req, res) => {
             masked[key] = value ? '••••' : '';
         }
     }
-    res.json({ config: masked, raw: env });
+    const isSet = {};
+    for (const key of Object.keys(env)) {
+        isSet[key] = true;
+    }
+    res.json({ config: masked, isSet });
 });
 
 // Save config
@@ -183,8 +195,8 @@ app.get('/api/connectors', (req, res) => {
             // Firebase is connected if Google login exists + project ID is set
             connected = !!(firebaseAuth?.hasToken && env['FIREBASE_PROJECT_ID']);
         } else if (c.name === 'gmail') {
-            // Gmail is connected if OAuth token exists
-            connected = fs.existsSync(GMAIL_TOKEN_FILE);
+            // Gmail is connected if legacy token or gcloud ADC exists
+            connected = fs.existsSync(GMAIL_TOKEN_FILE) || fs.existsSync(ADC_FILE);
         } else {
             connected = c.envVars
                 .filter(v => v.required)
@@ -305,82 +317,64 @@ app.post('/api/firebase/select-project', (req, res) => {
 
 // ── Gmail-specific routes ────────────────────────────────────
 
-function runPython(args) {
-    const uvVenvPy = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
-    const venvPy = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
-    const py = fs.existsSync(uvVenvPy) ? uvVenvPy : fs.existsSync(venvPy) ? venvPy : 'python3';
-    const envVars = { ...process.env, ...readEnv() };
+// Track active Gmail login process
+let gmailLoginProcess = null;
 
-    return new Promise((resolve, reject) => {
-        const proc = spawn(py, args, { cwd: PROJECT_ROOT, stdio: ['ignore', 'pipe', 'pipe'], env: envVars });
-        let out = '', err = '';
-        proc.stdout.on('data', d => { out += d; });
-        proc.stderr.on('data', d => { err += d; });
-        proc.on('close', () => {
-            if (err) console.error('[gmail_auth]', err.trim());
-            try { resolve(JSON.parse(out.trim())); } catch { reject(new Error(err || out || 'unknown error')); }
-        });
-    });
-}
+const GMAIL_SCOPES = [
+    'openid',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/gmail.send',
+].join(',');
 
-// Check Gmail login status
+// Check Gmail login status (legacy token OR gcloud ADC)
 app.get('/api/gmail/status', (req, res) => {
     try {
-        if (!fs.existsSync(GMAIL_TOKEN_FILE)) {
-            return res.json({ loggedIn: false, email: null });
+        // Check legacy token
+        if (fs.existsSync(GMAIL_TOKEN_FILE)) {
+            const tokenData = JSON.parse(fs.readFileSync(GMAIL_TOKEN_FILE, 'utf-8'));
+            if (tokenData.refresh_token || tokenData.token) {
+                const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
+                const email = fs.existsSync(emailFile) ? fs.readFileSync(emailFile, 'utf-8').trim() : null;
+                return res.json({ loggedIn: true, email, loginInProgress: !!gmailLoginProcess });
+            }
         }
-        const tokenData = JSON.parse(fs.readFileSync(GMAIL_TOKEN_FILE, 'utf-8'));
-        const loggedIn = !!(tokenData.refresh_token || tokenData.token);
-        const emailFile = path.join(os.homedir(), '.clawfounder', 'gmail_email.txt');
-        const email = fs.existsSync(emailFile) ? fs.readFileSync(emailFile, 'utf-8').trim() : null;
-        res.json({ loggedIn, email });
+        // Check gcloud ADC
+        if (fs.existsSync(ADC_FILE)) {
+            return res.json({ loggedIn: true, email: null, loginInProgress: !!gmailLoginProcess });
+        }
+        res.json({ loggedIn: false, email: null, loginInProgress: !!gmailLoginProcess });
     } catch {
-        res.json({ loggedIn: false, email: null });
+        res.json({ loggedIn: false, email: null, loginInProgress: !!gmailLoginProcess });
     }
 });
 
-// Get the Google OAuth URL — frontend opens it in a popup
-app.post('/api/gmail/login', async (req, res) => {
-    const env = readEnv();
-    const hasClientId = env['GMAIL_CLIENT_ID'] && env['GMAIL_CLIENT_ID'].length > 0;
-    const credsFilePath = env['GMAIL_CREDENTIALS_FILE'] ? path.resolve(PROJECT_ROOT, env['GMAIL_CREDENTIALS_FILE']) : '';
-    const hasCredsFile = credsFilePath && fs.existsSync(credsFilePath);
-
-    if (!hasClientId && !hasCredsFile) {
-        return res.status(400).json({ status: 'error', error: 'Gmail OAuth not configured. Set GMAIL_CREDENTIALS_FILE in .env.' });
-    }
-    if (fs.existsSync(GMAIL_TOKEN_FILE)) {
-        return res.json({ status: 'already_authenticated' });
+// Start gcloud ADC login (mirrors Firebase login pattern)
+app.post('/api/gmail/login', (req, res) => {
+    if (gmailLoginProcess) {
+        return res.json({ status: 'already_running', message: 'Login already in progress. Complete it in your browser.' });
     }
 
-    try {
-        const result = await runPython([path.join(__dirname, 'gmail_auth.py'), '--url-only']);
-        if (result.error) return res.status(400).json({ status: 'error', error: result.error });
-        res.json({ status: 'started', authUrl: result.authUrl });
-    } catch (err) {
-        res.status(500).json({ status: 'error', error: err.message });
-    }
-});
+    const proc = spawn('gcloud', [
+        'auth', 'application-default', 'login',
+        `--scopes=${GMAIL_SCOPES}`,
+    ], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        shell: true,
+    });
 
-// Google redirects the popup here after user authorizes
-app.get('/api/gmail/callback', async (req, res) => {
-    const { code, error } = req.query;
-    const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-    const errorPage = msg => `<html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a2e;color:#ef4444"><h2>${esc(msg)}</h2></body></html>`;
+    gmailLoginProcess = proc;
+    let output = '';
 
-    if (error || !code) {
-        return res.send(errorPage(error || 'Missing auth code'));
-    }
-    try {
-        const result = await runPython([path.join(__dirname, 'gmail_auth.py'), '--exchange-code', code]);
-        if (result.success) {
-            res.send('<html><body style="font-family:system-ui;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;background:#1a1a2e;color:#e0e0e0"><div style="text-align:center"><div style="font-size:48px;margin-bottom:16px">✅</div><h2 style="color:#4ade80;margin:0">Gmail connected!</h2><p style="color:#888;margin-top:8px">Closing...</p></div><script>setTimeout(()=>window.close(),1200)</script></body></html>');
-        } else {
-            res.send(errorPage(result.error || 'Login failed'));
-        }
-    } catch (err) {
-        res.send(errorPage(err.message));
-    }
+    proc.stdout.on('data', (data) => { output += data.toString(); });
+    proc.stderr.on('data', (data) => { output += data.toString(); });
+
+    proc.on('close', (code) => {
+        gmailLoginProcess = null;
+        console.log('Gmail gcloud login process exited with code:', code);
+    });
+
+    res.json({ status: 'started', message: 'Browser should open for Google login. Complete the login there.' });
 });
 
 // ── Chat SSE endpoint ───────────────────────────────────────────

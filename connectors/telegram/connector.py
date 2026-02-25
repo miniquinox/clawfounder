@@ -5,6 +5,12 @@ Telegram connector — Send and receive messages via a Telegram bot.
 import os
 import json
 
+
+def is_connected() -> bool:
+    """Return True if Telegram bot credentials are set."""
+    return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+
+
 TOOLS = [
     {
         "name": "telegram_send_message",

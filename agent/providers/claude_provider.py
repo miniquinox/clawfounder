@@ -50,7 +50,7 @@ def chat(prompt: str, tools: list, route_fn) -> str:
     max_iterations = 10
     for _ in range(max_iterations):
         kwargs = {
-            "model": "claude-sonnet-4-20250514",
+            "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             "max_tokens": 4096,
             "system": system,
             "messages": messages,

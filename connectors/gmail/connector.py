@@ -1,12 +1,15 @@
 """
 Gmail connector — Read, search, and send emails via the Gmail API.
 
-Auth: Uses OAuth 2.0 with bundled client credentials for zero-config setup.
-Token is stored at ~/.clawfounder/gmail_token.json and persists forever
-(auto-refreshes). Users can override with GMAIL_CREDENTIALS_FILE env var.
+Auth: Uses Application Default Credentials (ADC) via gcloud CLI — no
+Google Cloud project or credentials file needed.  Run once:
+    gcloud auth application-default login --scopes=openid,\\
+      https://www.googleapis.com/auth/userinfo.email,\\
+      https://www.googleapis.com/auth/gmail.readonly,\\
+      https://www.googleapis.com/auth/gmail.send
+Legacy OAuth tokens at ~/.clawfounder/gmail_token.json are still honoured.
 """
 
-import os
 import json
 import base64
 from pathlib import Path
@@ -19,6 +22,13 @@ _SCOPES = [
 
 _TOKEN_DIR = Path.home() / ".clawfounder"
 _TOKEN_FILE = _TOKEN_DIR / "gmail_token.json"
+
+_ADC_FILE = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+
+
+def is_connected() -> bool:
+    """Return True if Gmail credentials are available (token file or gcloud ADC)."""
+    return _TOKEN_FILE.exists() or _ADC_FILE.exists()
 
 
 # ─── Tool Definitions ──────────────────────────────────────────
@@ -102,36 +112,61 @@ TOOLS = [
 
 # ─── Auth ──────────────────────────────────────────────────────
 
+_GCLOUD_CMD = (
+    "gcloud auth application-default login "
+    "--scopes=openid,"
+    "https://www.googleapis.com/auth/userinfo.email,"
+    "https://www.googleapis.com/auth/gmail.readonly,"
+    "https://www.googleapis.com/auth/gmail.send"
+)
+
+
 def _get_gmail_service():
-    """Build and return the Gmail API service using saved OAuth token."""
+    """Build and return the Gmail API service.
+
+    Tries in order:
+      1. Legacy OAuth token file (~/.clawfounder/gmail_token.json)
+      2. Application Default Credentials (gcloud ADC)
+      3. Raises with a clear gcloud command to run
+    """
     try:
         from google.oauth2.credentials import Credentials
         from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
+        import google.auth
     except ImportError:
         raise ImportError(
             "Gmail dependencies not installed. Run: bash connectors/gmail/install.sh"
         )
 
-    # Check for existing token
-    token_file = Path(os.environ.get("GMAIL_TOKEN_FILE", str(_TOKEN_FILE)))
-    creds = None
-
-    if token_file.exists():
-        creds = Credentials.from_authorized_user_file(str(token_file), _SCOPES)
-
-    if not creds or not creds.valid:
+    # --- Tier 1: Legacy token file (backward compat) ---
+    if _TOKEN_FILE.exists():
+        creds = Credentials.from_authorized_user_file(str(_TOKEN_FILE), _SCOPES)
+        if creds and creds.valid:
+            return build("gmail", "v1", credentials=creds)
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            token_file.parent.mkdir(parents=True, exist_ok=True)
-            token_file.write_text(creds.to_json())
-        else:
-            raise ValueError(
-                "Gmail not authenticated. Click 'Sign in with Google' in the "
-                "ClawFounder dashboard to connect your Gmail account."
-            )
+            try:
+                creds.refresh(Request())
+                _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _TOKEN_FILE.write_text(creds.to_json())
+                return build("gmail", "v1", credentials=creds)
+            except Exception:
+                pass  # fall through to ADC
 
-    return build("gmail", "v1", credentials=creds)
+    # --- Tier 2: Application Default Credentials (gcloud) ---
+    try:
+        creds, _ = google.auth.default(scopes=_SCOPES)
+        creds.refresh(Request())
+        return build("gmail", "v1", credentials=creds)
+    except Exception:
+        pass
+
+    # --- Tier 3: Clear error ---
+    raise ValueError(
+        "Gmail not authenticated. Run this command and complete the browser login:\n\n"
+        f"  {_GCLOUD_CMD}\n\n"
+        "Or click 'Sign in with Google' on the Gmail card in the ClawFounder dashboard."
+    )
 
 
 # ─── Tool Implementations ──────────────────────────────────────

@@ -5,6 +5,12 @@ GitHub connector — Repos, commits, issues, and PRs via the GitHub API.
 import os
 import json
 
+
+def is_connected() -> bool:
+    """Return True if GITHUB_TOKEN is set."""
+    return bool(os.environ.get("GITHUB_TOKEN"))
+
+
 TOOLS = [
     {
         "name": "github_list_repos",

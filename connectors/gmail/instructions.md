@@ -11,22 +11,20 @@ Connects ClawFounder to your Gmail account using the Gmail API (Google's officia
 
 ## Authentication
 
-Gmail uses OAuth 2.0. You need to:
+Gmail uses **Application Default Credentials** (ADC) via the gcloud CLI — no Google Cloud project or credentials file needed.
 
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a project (or use an existing one)
-3. Enable the **Gmail API**
-4. Create **OAuth 2.0 credentials** (Desktop app type)
-5. Download the `credentials.json` file
-6. Set `GMAIL_CREDENTIALS_FILE` in your `.env` to the path of the downloaded file
+### Quick Setup
 
-The first time you use this connector, it will open a browser window to authorize access. After that, it saves a token locally at `~/.clawfounder/gmail_token.json` so you don't have to re-authorize.
+```bash
+gcloud auth application-default login \
+  --scopes=openid,https://www.googleapis.com/auth/userinfo.email,https://www.googleapis.com/auth/gmail.readonly,https://www.googleapis.com/auth/gmail.send
+```
 
-## Environment Variables
+This opens a browser window to authorize access. After that, gcloud saves credentials locally and the connector picks them up automatically.
 
-| Variable | Description | Required |
-|---|---|---|
-| `GMAIL_CREDENTIALS_FILE` | Path to your `credentials.json` from Google Cloud Console | Yes |
+You can also click **Sign in with Google** on the Gmail card in the ClawFounder dashboard — it runs the same command for you.
+
+> **Note:** If you previously used OAuth with a `credentials.json` file, the existing token at `~/.clawfounder/gmail_token.json` will continue to work. No migration needed.
 
 ## Setup
 

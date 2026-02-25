@@ -247,7 +247,15 @@ export default function ChatView() {
                             setMessages(prev => {
                                 const msgs = [...prev]
                                 const last = { ...msgs[msgs.length - 1] }
-                                last.events = [...last.events, event]
+                                const evts = [...last.events]
+                                // Merge consecutive text chunks into one bubble
+                                const lastEvt = evts[evts.length - 1]
+                                if (lastEvt && lastEvt.type === 'text') {
+                                    evts[evts.length - 1] = { ...lastEvt, text: lastEvt.text + event.text }
+                                } else {
+                                    evts.push(event)
+                                }
+                                last.events = evts
                                 last.finalText = (last.finalText || '') + event.text
                                 msgs[msgs.length - 1] = last
                                 return msgs

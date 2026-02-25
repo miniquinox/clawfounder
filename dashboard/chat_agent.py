@@ -55,6 +55,10 @@ def load_all_connectors():
             spec.loader.exec_module(module)
 
             if hasattr(module, "TOOLS") and hasattr(module, "handle"):
+                # Skip connectors that report themselves as not connected
+                if hasattr(module, "is_connected") and callable(module.is_connected):
+                    if not module.is_connected():
+                        continue
                 loaded[folder.name] = module
         except Exception:
             pass  # Skip connectors with missing deps
@@ -62,22 +66,25 @@ def load_all_connectors():
     return loaded
 
 
-# ── Gemini via Python SDK (gemini-3-flash-preview + thinking) ────
+# ── Provider: Gemini ─────────────────────────────────────────────
 
-GEMINI_MODEL = "gemini-3-flash-preview"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def run_gemini(message, history, connectors):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_CLOUD_API_KEY", "")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_CLOUD_API_KEY")
     if not api_key:
         emit({"type": "error", "error": "GEMINI_API_KEY not set."})
         return
 
-    client = genai.Client(vertexai=True, api_key=api_key)
-    emit({"type": "thinking", "text": f"Using {GEMINI_MODEL} with thinking..."})
+    # AI Studio keys start with "AIza", everything else is a GCP key needing Vertex AI
+    if api_key.startswith("AIza"):
+        client = genai.Client(api_key=api_key)
+    else:
+        client = genai.Client(vertexai=True)
 
     # Build tool declarations from connectors
     all_tools = []
@@ -112,89 +119,90 @@ def run_gemini(message, history, connectors):
         parts=[types.Part(text=message)],
     ))
 
-    # Generation config with thinking
     config = types.GenerateContentConfig(
         tools=[gemini_tools] if gemini_tools else [],
         system_instruction=system,
         temperature=1,
         top_p=0.95,
-        max_output_tokens=65535,
-        thinking_config=types.ThinkingConfig(thinking_level="HIGH"),
+        max_output_tokens=8192,
     )
 
-    # Agentic loop
-    max_turns = 20
+    # Agentic loop with streaming
+    max_turns = 10
     for turn in range(max_turns):
         try:
-            response = client.models.generate_content(
+            streamed_text = ""
+            function_calls = []
+
+            for chunk in client.models.generate_content_stream(
                 model=GEMINI_MODEL,
                 contents=contents,
                 config=config,
-            )
+            ):
+                if not chunk.candidates:
+                    continue
+                content = chunk.candidates[0].content
+                if not content or not content.parts:
+                    continue
+                for part in content.parts:
+                    if hasattr(part, 'thought') and part.thought:
+                        continue
+                    if part.text:
+                        streamed_text += part.text
+                        emit({"type": "text", "text": part.text})
+                    elif part.function_call:
+                        function_calls.append(part)
+
+            if not streamed_text and not function_calls:
+                emit({"type": "error", "error": "Empty response from Gemini"})
+                return
+
         except Exception as e:
             emit({"type": "error", "error": str(e)[:300]})
             return
 
-        if not response.candidates or not response.candidates[0].content:
-            emit({"type": "error", "error": "Empty response from Gemini"})
-            return
-
-        # Process parts
-        has_function_calls = False
-        function_response_parts = []
-
-        for part in response.candidates[0].content.parts:
-            # Skip thinking parts (internal reasoning)
-            if hasattr(part, 'thought') and part.thought:
-                continue
-
-            if part.function_call:
-                has_function_calls = True
-                fc = part.function_call
-                tool_name = fc.name
-                args = dict(fc.args) if fc.args else {}
-                conn_name, module = tool_map.get(tool_name, ("unknown", None))
-
-                emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
-
-                # Execute tool
-                if module:
-                    try:
-                        result = module.handle(tool_name, args)
-                    except Exception as e:
-                        result = f"Tool error: {e}"
-                else:
-                    result = f"Unknown tool: {tool_name}"
-
-                truncated = len(result) > 500 if isinstance(result, str) else False
-                emit({
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "connector": conn_name,
-                    "result": result[:2000] if isinstance(result, str) else str(result)[:2000],
-                    "truncated": truncated,
-                })
-
-                function_response_parts.append(
-                    types.Part(function_response=types.FunctionResponse(
-                        name=tool_name,
-                        response={"result": result},
-                    ))
-                )
-
-            elif part.text:
-                if not has_function_calls:
-                    emit({"type": "text", "text": part.text})
-
-        if not has_function_calls:
+        if not function_calls:
             break
 
-        # Continue the loop with tool results
-        contents.append(response.candidates[0].content)
-        contents.append(types.Content(
-            role="user",
-            parts=function_response_parts,
-        ))
+        # Execute tool calls
+        function_response_parts = []
+        for part in function_calls:
+            fc = part.function_call
+            tool_name = fc.name
+            args = dict(fc.args) if fc.args else {}
+            conn_name, module = tool_map.get(tool_name, ("unknown", None))
+
+            emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
+
+            if module:
+                try:
+                    result = module.handle(tool_name, args)
+                except Exception as e:
+                    result = f"Tool error: {e}"
+            else:
+                result = f"Unknown tool: {tool_name}"
+
+            truncated = len(result) > 500 if isinstance(result, str) else False
+            emit({
+                "type": "tool_result", "tool": tool_name, "connector": conn_name,
+                "result": result[:2000] if isinstance(result, str) else str(result)[:2000],
+                "truncated": truncated,
+            })
+
+            function_response_parts.append(
+                types.Part(function_response=types.FunctionResponse(
+                    name=tool_name,
+                    response={"result": result},
+                ))
+            )
+
+        # Build model's response for conversation history
+        model_parts = []
+        if streamed_text:
+            model_parts.append(types.Part(text=streamed_text))
+        model_parts.extend(function_calls)
+        contents.append(types.Content(role="model", parts=model_parts))
+        contents.append(types.Content(role="user", parts=function_response_parts))
 
     emit({"type": "done"})
 
@@ -235,7 +243,8 @@ def run_openai(message, history, connectors):
 
     max_turns = 20
     for turn in range(max_turns):
-        body = {"model": "gpt-4o-mini", "messages": messages}
+        model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+        body = {"model": model, "messages": messages}
         if tool_defs:
             body["tools"] = tool_defs
 
@@ -324,7 +333,7 @@ def run_claude(message, history, connectors):
     max_turns = 20
     for turn in range(max_turns):
         body = {
-            "model": "claude-sonnet-4-20250514",
+            "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             "max_tokens": 4096,
             "system": "You are ClawFounder 🦀 — a personal AI agent. Be concise and helpful.",
             "messages": messages,

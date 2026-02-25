@@ -278,34 +278,9 @@ function GmailCard({ connector, onRefresh }) {
   const handleLogin = async () => {
     setLoadingLogin(true)
     try {
-      const resp = await fetch('/api/gmail/login', { method: 'POST' })
-      const data = await resp.json()
+      await fetch('/api/gmail/login', { method: 'POST' })
 
-      if (data.status === 'error') {
-        setToast(data.error)
-        setTimeout(() => setToast(null), 6000)
-        setLoadingLogin(false)
-        return
-      }
-
-      if (data.status === 'already_authenticated') {
-        await fetchStatus()
-        setLoadingLogin(false)
-        onRefresh()
-        setToast('Gmail connected!')
-        setTimeout(() => setToast(null), 3000)
-        return
-      }
-
-      // Open the Google consent screen in a popup
-      if (data.authUrl) {
-        const w = 500, h = 650
-        const left = window.screenX + (window.outerWidth - w) / 2
-        const top = window.screenY + (window.outerHeight - h) / 2
-        window.open(data.authUrl, 'gmail_auth', `popup,width=${w},height=${h},left=${left},top=${top}`)
-      }
-
-      // Poll for login completion (callback saves token, then status flips)
+      // Poll for login completion (gcloud opens browser itself)
       stopPolling()
       pollRef.current = setInterval(async () => {
         const s = await fetchStatus()
@@ -316,7 +291,7 @@ function GmailCard({ connector, onRefresh }) {
           setToast('Gmail connected!')
           setTimeout(() => setToast(null), 3000)
         }
-      }, 1500)
+      }, 2000)
       // Stop polling after 2 minutes
       timeoutRef.current = setTimeout(() => { stopPolling(); setLoadingLogin(false) }, 120000)
     } catch {
@@ -430,7 +405,7 @@ export default function App() {
   const [tab, setTab] = useState('connect')
   const [connectors, setConnectors] = useState([])
   const [config, setConfig] = useState({})
-  const [rawConfig, setRawConfig] = useState({})
+  const [isSetConfig, setIsSetConfig] = useState({})
   const [editValues, setEditValues] = useState({})
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState(null)
@@ -444,7 +419,7 @@ export default function App() {
     const [cData, cfgData] = await Promise.all([cRes.json(), cfgRes.json()])
     setConnectors(cData.connectors)
     setConfig(cfgData.config)
-    setRawConfig(cfgData.raw)
+    setIsSetConfig(cfgData.isSet || {})
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
@@ -497,7 +472,7 @@ export default function App() {
     setSaving(false)
   }
 
-  const hasValue = (key) => rawConfig[key] && rawConfig[key].length > 0
+  const hasValue = (key) => !!isSetConfig[key]
   const isEditing = (key) => editValues[key] !== undefined
 
   return (

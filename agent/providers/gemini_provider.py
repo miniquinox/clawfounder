@@ -1,24 +1,29 @@
 """
 gemini_provider.py — Google Gemini function-calling wrapper.
+Uses the modern google-genai SDK.
 """
 
 import os
 import json
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
-def _convert_tools_to_gemini_format(tools: list) -> list:
-    """Convert our connector tool definitions to Gemini's function declaration format."""
-    declarations = []
-    for tool in tools:
-        declarations.append(
-            genai.protos.FunctionDeclaration(
-                name=tool["name"],
-                description=tool["description"],
-                parameters=tool.get("parameters", {"type": "object", "properties": {}}),
-            )
+def _convert_tools(tools: list) -> types.Tool | None:
+    """Convert connector tool definitions to Gemini FunctionDeclarations."""
+    if not tools:
+        return None
+    declarations = [
+        types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool["description"],
+            parameters=tool.get("parameters", {}),
         )
-    return declarations
+        for tool in tools
+    ]
+    return types.Tool(function_declarations=declarations)
 
 
 def chat(prompt: str, tools: list, route_fn) -> str:
@@ -34,61 +39,73 @@ def chat(prompt: str, tools: list, route_fn) -> str:
     Returns:
         The final text response from Gemini.
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_CLOUD_API_KEY")
     if not api_key:
         return "Error: GEMINI_API_KEY not set. Add it to your .env file."
 
-    genai.configure(api_key=api_key)
+    # AI Studio keys start with "AIza", everything else is a GCP key needing Vertex AI
+    if api_key.startswith("AIza"):
+        client = genai.Client(api_key=api_key)
+    else:
+        client = genai.Client(vertexai=True)
+    gemini_tools = _convert_tools(tools)
 
-    # Convert tools to Gemini format
-    function_declarations = _convert_tools_to_gemini_format(tools)
-    gemini_tools = [genai.protos.Tool(function_declarations=function_declarations)] if function_declarations else []
-
-    model = genai.GenerativeModel(
-        model_name="gemini-2.0-flash",
-        tools=gemini_tools,
-        system_instruction=(
-            "You are ClawFounder, an AI assistant with access to various tools and services. "
-            "Use the available tools to help answer the user's questions. "
-            "When you need information from a service, call the appropriate tool. "
-            "Be concise and helpful."
-        ),
+    system = (
+        "You are ClawFounder, an AI assistant with access to various tools and services. "
+        "Use the available tools to help answer the user's questions. "
+        "When you need information from a service, call the appropriate tool. "
+        "Be concise and helpful."
     )
 
-    chat_session = model.start_chat()
-    response = chat_session.send_message(prompt)
+    contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
 
-    # Tool-call loop: keep going until we get a text response
+    config = types.GenerateContentConfig(
+        tools=[gemini_tools] if gemini_tools else [],
+        system_instruction=system,
+        temperature=1,
+        max_output_tokens=8192,
+    )
+
     max_iterations = 10
     for _ in range(max_iterations):
-        # Check if the response has function calls
+        response = client.models.generate_content(
+            model=GEMINI_MODEL, contents=contents, config=config,
+        )
+
+        if not response.candidates or not response.candidates[0].content:
+            return "No response from Gemini."
+
+        # Check for function calls
         function_calls = []
-        for part in response.parts:
-            if hasattr(part, "function_call") and part.function_call.name:
+        for part in response.candidates[0].content.parts:
+            if hasattr(part, 'thought') and part.thought:
+                continue
+            if part.function_call:
                 function_calls.append(part.function_call)
 
         if not function_calls:
-            # No tool calls — we have our final answer
-            break
+            # Final text answer
+            text_parts = [
+                p.text for p in response.candidates[0].content.parts
+                if p.text and not (hasattr(p, 'thought') and p.thought)
+            ]
+            return "\n".join(text_parts) if text_parts else "No response from Gemini."
 
-        # Execute each tool call and send results back
-        tool_responses = []
+        # Execute tool calls
+        function_response_parts = []
         for fc in function_calls:
             args = dict(fc.args) if fc.args else {}
-            print(f"  🔧 Calling: {fc.name}({json.dumps(args)})")
+            print(f"  Calling: {fc.name}({json.dumps(args)})")
             result = route_fn(fc.name, args)
-            print(f"  📤 Result: {result[:200]}{'...' if len(result) > 200 else ''}")
-            tool_responses.append(
-                genai.protos.Part(
-                    function_response=genai.protos.FunctionResponse(
-                        name=fc.name,
-                        response={"result": result},
-                    )
-                )
+            print(f"  Result: {result[:200]}{'...' if len(result) > 200 else ''}")
+            function_response_parts.append(
+                types.Part(function_response=types.FunctionResponse(
+                    name=fc.name,
+                    response={"result": result},
+                ))
             )
 
-        response = chat_session.send_message(tool_responses)
+        contents.append(response.candidates[0].content)
+        contents.append(types.Content(role="user", parts=function_response_parts))
 
-    # Extract final text
-    text_parts = [part.text for part in response.parts if hasattr(part, "text") and part.text]
-    return "\n".join(text_parts) if text_parts else "No response from Gemini."
+    return "Max tool-call iterations reached."

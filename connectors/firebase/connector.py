@@ -14,6 +14,20 @@ Project detection priority:
 
 import os
 import json
+from pathlib import Path
+
+
+def is_connected() -> bool:
+    """Return True if Firebase credentials are available."""
+    if os.environ.get("FIREBASE_PROJECT_ID", "").strip():
+        return True
+    # Check .firebaserc in project root
+    rc_path = Path(__file__).parent.parent.parent / ".firebaserc"
+    if rc_path.exists():
+        return True
+    # Check gcloud ADC file as a proxy for gcloud auth
+    adc_file = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+    return adc_file.exists()
 
 
 TOOLS = [

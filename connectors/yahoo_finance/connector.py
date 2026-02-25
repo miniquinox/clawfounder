@@ -6,6 +6,12 @@ No API key needed! 🎉
 
 import json
 
+
+def is_connected() -> bool:
+    """Always connected — no credentials needed."""
+    return True
+
+
 TOOLS = [
     {
         "name": "yahoo_finance_quote",

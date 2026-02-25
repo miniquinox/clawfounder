@@ -57,7 +57,7 @@ def chat(prompt: str, tools: list, route_fn) -> str:
 
     max_iterations = 10
     for _ in range(max_iterations):
-        kwargs = {"model": "gpt-4o", "messages": messages}
+        kwargs = {"model": os.environ.get("OPENAI_MODEL", "gpt-4o"), "messages": messages}
         if openai_tools:
             kwargs["tools"] = openai_tools
 

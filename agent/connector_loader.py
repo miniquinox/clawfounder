@@ -74,6 +74,12 @@ def load_connectors(connectors_dir: str = None) -> dict:
                 print(f"⚠️  Skipping {folder.name}/ — handle is not callable")
                 continue
 
+            # Check is_connected() if defined; assume connected if missing
+            if hasattr(module, "is_connected") and callable(module.is_connected):
+                if not module.is_connected():
+                    print(f"⏭️  Skipping {folder.name}/ — not connected")
+                    continue
+
             connectors[folder.name] = {
                 "tools": module.TOOLS,
                 "handle": module.handle,
