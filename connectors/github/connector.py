@@ -459,6 +459,481 @@ TOOLS = [
             "required": ["query"],
         },
     },
+    # ── Write Operations (files + repos) ──────────────────────
+    {
+        "name": "github_create_or_update_file",
+        "description": "Create or update a single file in a GitHub repository. If the file exists, you must provide its current SHA (or set auto_sha=true to fetch it automatically). The content should be the raw text — it will be base64-encoded automatically.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File path within the repo (e.g., 'docs/README.md')",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The full file content (raw text)",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Commit message",
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Branch to commit to (default: repo default branch)",
+                },
+                "sha": {
+                    "type": "string",
+                    "description": "Current blob SHA of the file (required for updates, omit for new files). Set to 'auto' to fetch automatically.",
+                },
+            },
+            "required": ["repo", "path", "content", "message"],
+        },
+    },
+    {
+        "name": "github_delete_file",
+        "description": "Delete a file from a GitHub repository. Requires the file's current SHA (set to 'auto' to fetch it automatically).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "path": {
+                    "type": "string",
+                    "description": "File path to delete",
+                },
+                "message": {
+                    "type": "string",
+                    "description": "Commit message for the deletion",
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Branch to commit to (default: repo default branch)",
+                },
+                "sha": {
+                    "type": "string",
+                    "description": "Current blob SHA of the file. Set to 'auto' to fetch automatically.",
+                },
+            },
+            "required": ["repo", "path", "message"],
+        },
+    },
+    {
+        "name": "github_create_branch",
+        "description": "Create a new branch in a GitHub repository from an existing branch, tag, or commit.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Name for the new branch",
+                },
+                "source_branch": {
+                    "type": "string",
+                    "description": "Source branch to create from (default: repo default branch)",
+                },
+            },
+            "required": ["repo", "branch"],
+        },
+    },
+    {
+        "name": "github_delete_branch",
+        "description": "Delete a branch from a GitHub repository. Cannot delete the default branch.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "branch": {
+                    "type": "string",
+                    "description": "Branch name to delete",
+                },
+            },
+            "required": ["repo", "branch"],
+        },
+    },
+    {
+        "name": "github_create_repo",
+        "description": "Create a new GitHub repository for the authenticated user.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Repository name",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Repository description",
+                },
+                "private": {
+                    "type": "boolean",
+                    "description": "Whether the repo is private (default: false)",
+                },
+                "auto_init": {
+                    "type": "boolean",
+                    "description": "Initialize with a README (default: true)",
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "github_fork_repo",
+        "description": "Fork a repository to the authenticated user's account.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository to fork in 'owner/repo' format",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
+    # ── Issue/PR Mutations ────────────────────────────────────
+    {
+        "name": "github_update_issue",
+        "description": "Update a GitHub issue — edit title, body, state (open/closed), labels, or assignees. Note: setting labels replaces all existing labels.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "number": {
+                    "type": "integer",
+                    "description": "Issue number",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "New title",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "New body (markdown)",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed"],
+                    "description": "Set issue state",
+                },
+                "labels": {
+                    "type": "string",
+                    "description": "Comma-separated labels (replaces all existing labels)",
+                },
+                "assignees": {
+                    "type": "string",
+                    "description": "Comma-separated GitHub usernames to assign",
+                },
+            },
+            "required": ["repo", "number"],
+        },
+    },
+    {
+        "name": "github_update_pr",
+        "description": "Update a pull request — edit title, body, state (open/closed), or base branch.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "number": {
+                    "type": "integer",
+                    "description": "Pull request number",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "New title",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "New body (markdown)",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["open", "closed"],
+                    "description": "Set PR state",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "Change base branch",
+                },
+            },
+            "required": ["repo", "number"],
+        },
+    },
+    {
+        "name": "github_create_review",
+        "description": "Submit a review on a pull request. Events: APPROVE, REQUEST_CHANGES, or COMMENT.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "number": {
+                    "type": "integer",
+                    "description": "Pull request number",
+                },
+                "event": {
+                    "type": "string",
+                    "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                    "description": "Review action",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Review comment body (required for REQUEST_CHANGES and COMMENT)",
+                },
+            },
+            "required": ["repo", "number", "event"],
+        },
+    },
+    {
+        "name": "github_request_reviewers",
+        "description": "Request reviews on a pull request from specific users or teams.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "number": {
+                    "type": "integer",
+                    "description": "Pull request number",
+                },
+                "reviewers": {
+                    "type": "string",
+                    "description": "Comma-separated GitHub usernames to request review from",
+                },
+                "team_reviewers": {
+                    "type": "string",
+                    "description": "Comma-separated team slugs to request review from",
+                },
+            },
+            "required": ["repo", "number"],
+        },
+    },
+    # ── Diff & Comparison ─────────────────────────────────────
+    {
+        "name": "github_compare",
+        "description": "Compare two branches, tags, or commits. Shows ahead/behind counts and files changed.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "base": {
+                    "type": "string",
+                    "description": "Base branch, tag, or commit SHA",
+                },
+                "head": {
+                    "type": "string",
+                    "description": "Head branch, tag, or commit SHA",
+                },
+            },
+            "required": ["repo", "base", "head"],
+        },
+    },
+    # ── Workflows & CI ────────────────────────────────────────
+    {
+        "name": "github_trigger_workflow",
+        "description": "Trigger a GitHub Actions workflow dispatch event. The workflow must have a workflow_dispatch trigger.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "workflow_id": {
+                    "type": "string",
+                    "description": "Workflow file name (e.g., 'ci.yml') or numeric ID",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch or tag to run the workflow on (default: repo default branch)",
+                },
+                "inputs": {
+                    "type": "string",
+                    "description": "JSON string of workflow input key-value pairs",
+                },
+            },
+            "required": ["repo", "workflow_id"],
+        },
+    },
+    {
+        "name": "github_list_workflow_definitions",
+        "description": "List workflow definition files (e.g., ci.yml, deploy.yml) in a repository, not runs.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
+    # ── User & Meta ───────────────────────────────────────────
+    {
+        "name": "github_get_me",
+        "description": "Get the authenticated GitHub user's profile information.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
+    {
+        "name": "github_get_repo_tree",
+        "description": "Get the full file/directory tree of a repository at a given branch or SHA. Useful for understanding repo structure.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Branch, tag, or commit SHA (default: repo default branch)",
+                },
+                "recursive": {
+                    "type": "boolean",
+                    "description": "Recursively list all files (default: true)",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
+    {
+        "name": "github_list_tags",
+        "description": "List git tags for a repository.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max tags to return (default: 20)",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
+    # ── Gists ─────────────────────────────────────────────────
+    {
+        "name": "github_list_gists",
+        "description": "List the authenticated user's gists.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max gists to return (default: 10)",
+                },
+            },
+        },
+    },
+    {
+        "name": "github_create_gist",
+        "description": "Create a new GitHub gist with one or more files.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "Gist description",
+                },
+                "files": {
+                    "type": "string",
+                    "description": "JSON object mapping filenames to content, e.g. '{\"hello.py\": \"print(1)\", \"notes.txt\": \"some text\"}'",
+                },
+                "public": {
+                    "type": "boolean",
+                    "description": "Whether the gist is public (default: false)",
+                },
+            },
+            "required": ["files"],
+        },
+    },
+    # ── Releases & Stars ──────────────────────────────────────
+    {
+        "name": "github_create_release",
+        "description": "Create a new release on a GitHub repository.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "tag": {
+                    "type": "string",
+                    "description": "Tag name for the release (e.g., 'v1.0.0')",
+                },
+                "name": {
+                    "type": "string",
+                    "description": "Release title",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Release notes (markdown)",
+                },
+                "draft": {
+                    "type": "boolean",
+                    "description": "Create as draft release (default: false)",
+                },
+                "prerelease": {
+                    "type": "boolean",
+                    "description": "Mark as prerelease (default: false)",
+                },
+            },
+            "required": ["repo", "tag"],
+        },
+    },
+    {
+        "name": "github_star_repo",
+        "description": "Star or unstar a GitHub repository.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Repository in 'owner/repo' format",
+                },
+                "unstar": {
+                    "type": "boolean",
+                    "description": "Set to true to unstar instead of star (default: false)",
+                },
+            },
+            "required": ["repo"],
+        },
+    },
 ]
 
 
@@ -936,6 +1411,418 @@ def _search(query: str, search_type: str = "issues", max_results: int = 10, acco
     return json.dumps(results, indent=2)
 
 
+# ─── File & Repo Write Handlers ──────────────────────────────────
+
+def _create_or_update_file(repo: str, path: str, content: str, message: str,
+                           branch: str = None, sha: str = None, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    kwargs = {"path": path, "message": message, "content": content}
+    if branch:
+        kwargs["branch"] = branch
+
+    # Auto-fetch SHA if requested or if file exists
+    if sha == "auto" or sha is None:
+        try:
+            fc_kwargs = {"path": path}
+            if branch:
+                fc_kwargs["ref"] = branch
+            existing = r.get_contents(**fc_kwargs)
+            if not isinstance(existing, list):
+                kwargs["sha"] = existing.sha
+        except Exception:
+            # File doesn't exist — that's fine for create
+            if sha == "auto":
+                pass
+    elif sha:
+        kwargs["sha"] = sha
+
+    is_update = "sha" in kwargs
+    result = r.update_file(**kwargs) if is_update else r.create_file(**kwargs)
+    commit = result["commit"]
+    return json.dumps({
+        "action": "updated" if is_update else "created",
+        "path": path,
+        "sha": result["content"].sha if result.get("content") else "",
+        "commit_sha": commit.sha,
+        "commit_url": commit.html_url,
+        "message": f"File '{path}' {'updated' if is_update else 'created'} successfully.",
+    }, indent=2)
+
+
+def _delete_file(repo: str, path: str, message: str, branch: str = None,
+                 sha: str = None, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+
+    # Auto-fetch SHA
+    if not sha or sha == "auto":
+        fc_kwargs = {"path": path}
+        if branch:
+            fc_kwargs["ref"] = branch
+        existing = r.get_contents(**fc_kwargs)
+        sha = existing.sha
+
+    kwargs = {"path": path, "message": message, "sha": sha}
+    if branch:
+        kwargs["branch"] = branch
+    result = r.delete_file(**kwargs)
+    commit = result["commit"]
+    return json.dumps({
+        "path": path,
+        "commit_sha": commit.sha,
+        "commit_url": commit.html_url,
+        "message": f"File '{path}' deleted successfully.",
+    }, indent=2)
+
+
+def _create_branch(repo: str, branch: str, source_branch: str = None, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    source = source_branch or r.default_branch
+    # Get the SHA of the source branch tip
+    source_ref = r.get_branch(source)
+    sha = source_ref.commit.sha
+    # create_git_ref needs "refs/heads/X" format
+    ref = r.create_git_ref(ref=f"refs/heads/{branch}", sha=sha)
+    return json.dumps({
+        "branch": branch,
+        "source": source,
+        "sha": sha[:8],
+        "ref": ref.ref,
+        "message": f"Branch '{branch}' created from '{source}'.",
+    }, indent=2)
+
+
+def _delete_branch(repo: str, branch: str, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    # get_git_ref needs "heads/X" format (no "refs/" prefix)
+    ref = r.get_git_ref(f"heads/{branch}")
+    ref.delete()
+    return json.dumps({
+        "branch": branch,
+        "message": f"Branch '{branch}' deleted successfully.",
+    }, indent=2)
+
+
+def _create_repo(name: str, description: str = "", private: bool = False,
+                 auto_init: bool = True, account_id=None) -> str:
+    g = _get_github(account_id)
+    user = g.get_user()
+    repo = user.create_repo(
+        name=name,
+        description=description,
+        private=private,
+        auto_init=auto_init,
+    )
+    return json.dumps({
+        "full_name": repo.full_name,
+        "private": repo.private,
+        "url": repo.html_url,
+        "clone_url": repo.clone_url,
+        "message": f"Repository '{repo.full_name}' created successfully.",
+    }, indent=2)
+
+
+def _fork_repo(repo: str, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    fork = r.create_fork()
+    return json.dumps({
+        "full_name": fork.full_name,
+        "parent": repo,
+        "url": fork.html_url,
+        "clone_url": fork.clone_url,
+        "message": f"Forked '{repo}' to '{fork.full_name}'.",
+    }, indent=2)
+
+
+# ─── Issue/PR Mutation Handlers ──────────────────────────────────
+
+def _update_issue(repo: str, number: int, title: str = None, body: str = None,
+                  state: str = None, labels: str = None, assignees: str = None,
+                  account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    issue = r.get_issue(number)
+    kwargs = {}
+    if title is not None:
+        kwargs["title"] = title
+    if body is not None:
+        kwargs["body"] = body
+    if state is not None:
+        kwargs["state"] = state
+    if labels is not None:
+        kwargs["labels"] = [l.strip() for l in labels.split(",") if l.strip()]
+    if assignees is not None:
+        kwargs["assignees"] = [a.strip() for a in assignees.split(",") if a.strip()]
+    issue.edit(**kwargs)
+    return json.dumps({
+        "number": issue.number,
+        "title": issue.title,
+        "state": issue.state,
+        "labels": [l.name for l in issue.labels],
+        "assignees": [a.login for a in issue.assignees],
+        "url": issue.html_url,
+        "message": f"Issue #{number} updated.",
+    }, indent=2)
+
+
+def _update_pr(repo: str, number: int, title: str = None, body: str = None,
+               state: str = None, base: str = None, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    pr = r.get_pull(number)
+    kwargs = {}
+    if title is not None:
+        kwargs["title"] = title
+    if body is not None:
+        kwargs["body"] = body
+    if state is not None:
+        kwargs["state"] = state
+    if base is not None:
+        kwargs["base"] = base
+    pr.edit(**kwargs)
+    return json.dumps({
+        "number": pr.number,
+        "title": pr.title,
+        "state": pr.state,
+        "base": pr.base.ref,
+        "url": pr.html_url,
+        "message": f"PR #{number} updated.",
+    }, indent=2)
+
+
+def _create_review(repo: str, number: int, event: str, body: str = "", account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    pr = r.get_pull(number)
+    review = pr.create_review(body=body, event=event)
+    return json.dumps({
+        "id": review.id,
+        "state": review.state,
+        "user": review.user.login if review.user else "Unknown",
+        "url": review.html_url,
+        "message": f"Review ({event}) submitted on PR #{number}.",
+    }, indent=2)
+
+
+def _request_reviewers(repo: str, number: int, reviewers: str = None,
+                       team_reviewers: str = None, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    pr = r.get_pull(number)
+    kwargs = {}
+    if reviewers:
+        kwargs["reviewers"] = [r.strip() for r in reviewers.split(",") if r.strip()]
+    if team_reviewers:
+        kwargs["team_reviewers"] = [t.strip() for t in team_reviewers.split(",") if t.strip()]
+    pr.create_review_request(**kwargs)
+    return json.dumps({
+        "number": number,
+        "requested_reviewers": kwargs.get("reviewers", []),
+        "requested_teams": kwargs.get("team_reviewers", []),
+        "message": f"Review requested on PR #{number}.",
+    }, indent=2)
+
+
+# ─── Diff & Comparison Handler ───────────────────────────────────
+
+def _compare(repo: str, base: str, head: str, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    comparison = r.compare(base, head)
+    files = []
+    for f in comparison.files[:50]:
+        files.append({
+            "filename": f.filename,
+            "status": f.status,
+            "additions": f.additions,
+            "deletions": f.deletions,
+            "changes": f.changes,
+        })
+    return json.dumps({
+        "base": base,
+        "head": head,
+        "status": comparison.status,
+        "ahead_by": comparison.ahead_by,
+        "behind_by": comparison.behind_by,
+        "total_commits": comparison.total_commits,
+        "files_changed": len(comparison.files),
+        "files": files,
+        "url": comparison.html_url,
+    }, indent=2)
+
+
+# ─── Workflow Handlers (new) ─────────────────────────────────────
+
+def _trigger_workflow(repo: str, workflow_id: str, ref: str = None,
+                      inputs: str = None, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    ref = ref or r.default_branch
+
+    # workflow_id can be filename or numeric ID
+    try:
+        wf_id = int(workflow_id)
+    except ValueError:
+        wf_id = workflow_id
+
+    workflow = r.get_workflow(wf_id)
+    input_dict = json.loads(inputs) if inputs else {}
+    success = workflow.create_dispatch(ref=ref, inputs=input_dict)
+    return json.dumps({
+        "triggered": success,
+        "workflow": workflow.name,
+        "ref": ref,
+        "inputs": input_dict,
+        "message": f"Workflow '{workflow.name}' dispatched on '{ref}'." if success else "Failed to trigger workflow.",
+    }, indent=2)
+
+
+def _list_workflow_definitions(repo: str, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    workflows = []
+    for wf in r.get_workflows():
+        workflows.append({
+            "id": wf.id,
+            "name": wf.name,
+            "path": wf.path,
+            "state": wf.state,
+        })
+    return json.dumps(workflows, indent=2)
+
+
+# ─── User & Meta Handlers ───────────────────────────────────────
+
+def _get_me(account_id=None) -> str:
+    g = _get_github(account_id)
+    user = g.get_user()
+    return json.dumps({
+        "login": user.login,
+        "name": user.name or "",
+        "email": user.email or "",
+        "bio": user.bio or "",
+        "public_repos": user.public_repos,
+        "private_repos": user.owned_private_repos or 0,
+        "followers": user.followers,
+        "following": user.following,
+        "created": user.created_at.isoformat() if user.created_at else "",
+        "url": user.html_url,
+    }, indent=2)
+
+
+def _get_repo_tree(repo: str, ref: str = None, recursive: bool = True, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    sha = ref or r.default_branch
+    tree = r.get_git_tree(sha=sha, recursive=recursive)
+    entries = []
+    for item in tree.tree:
+        entries.append({
+            "path": item.path,
+            "type": item.type,  # "blob" or "tree"
+            "size": item.size if item.type == "blob" else None,
+        })
+    return json.dumps({
+        "sha": tree.sha,
+        "total_entries": len(entries),
+        "truncated": tree.raw_data.get("truncated", False),
+        "tree": entries,
+    }, indent=2)
+
+
+def _list_tags(repo: str, max_results: int = 20, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    tags = []
+    for tag in r.get_tags()[:max_results]:
+        tags.append({
+            "name": tag.name,
+            "sha": tag.commit.sha[:8],
+        })
+    return json.dumps(tags, indent=2)
+
+
+# ─── Gist Handlers ──────────────────────────────────────────────
+
+def _list_gists(max_results: int = 10, account_id=None) -> str:
+    g = _get_github(account_id)
+    gists = []
+    for gist in g.get_user().get_gists()[:max_results]:
+        gists.append({
+            "id": gist.id,
+            "description": gist.description or "",
+            "public": gist.public,
+            "files": list(gist.files.keys()),
+            "created": gist.created_at.isoformat() if gist.created_at else "",
+            "updated": gist.updated_at.isoformat() if gist.updated_at else "",
+            "url": gist.html_url,
+        })
+    return json.dumps(gists, indent=2)
+
+
+def _create_gist(files: str, description: str = "", public: bool = False, account_id=None) -> str:
+    from github import InputFileContent
+    g = _get_github(account_id)
+    file_dict = json.loads(files)
+    gist_files = {name: InputFileContent(content) for name, content in file_dict.items()}
+    gist = g.get_user().create_gist(
+        public=public,
+        files=gist_files,
+        description=description,
+    )
+    return json.dumps({
+        "id": gist.id,
+        "url": gist.html_url,
+        "files": list(gist.files.keys()),
+        "message": "Gist created successfully.",
+    }, indent=2)
+
+
+# ─── Release & Star Handlers ────────────────────────────────────
+
+def _create_release(repo: str, tag: str, name: str = None, body: str = "",
+                    draft: bool = False, prerelease: bool = False, account_id=None) -> str:
+    g = _get_github(account_id)
+    r = g.get_repo(repo)
+    release = r.create_git_release(
+        tag=tag,
+        name=name or tag,
+        message=body,
+        draft=draft,
+        prerelease=prerelease,
+    )
+    return json.dumps({
+        "id": release.id,
+        "tag": release.tag_name,
+        "name": release.title,
+        "draft": release.draft,
+        "prerelease": release.prerelease,
+        "url": release.html_url,
+        "message": f"Release '{release.title}' created.",
+    }, indent=2)
+
+
+def _star_repo(repo: str, unstar: bool = False, account_id=None) -> str:
+    g = _get_github(account_id)
+    user = g.get_user()
+    r = g.get_repo(repo)
+    if unstar:
+        user.remove_from_starred(r)
+        action = "unstarred"
+    else:
+        user.add_to_starred(r)
+        action = "starred"
+    return json.dumps({
+        "repo": repo,
+        "action": action,
+        "message": f"Repository '{repo}' {action}.",
+    }, indent=2)
+
+
 # ─── Main Handler ────────────────────────────────────────────────
 
 def handle(tool_name: str, args: dict, account_id: str = None) -> str:
@@ -1035,6 +1922,119 @@ def handle(tool_name: str, args: dict, account_id: str = None) -> str:
                 max_results=args.get("max_results", 10),
                 account_id=account_id,
             )
+        # File & Repo Write Operations
+        elif tool_name == "github_create_or_update_file":
+            return _create_or_update_file(
+                args["repo"], args["path"], args["content"], args["message"],
+                branch=args.get("branch"),
+                sha=args.get("sha"),
+                account_id=account_id,
+            )
+        elif tool_name == "github_delete_file":
+            return _delete_file(
+                args["repo"], args["path"], args["message"],
+                branch=args.get("branch"),
+                sha=args.get("sha"),
+                account_id=account_id,
+            )
+        elif tool_name == "github_create_branch":
+            return _create_branch(
+                args["repo"], args["branch"],
+                source_branch=args.get("source_branch"),
+                account_id=account_id,
+            )
+        elif tool_name == "github_delete_branch":
+            return _delete_branch(args["repo"], args["branch"], account_id=account_id)
+        elif tool_name == "github_create_repo":
+            return _create_repo(
+                args["name"],
+                description=args.get("description", ""),
+                private=args.get("private", False),
+                auto_init=args.get("auto_init", True),
+                account_id=account_id,
+            )
+        elif tool_name == "github_fork_repo":
+            return _fork_repo(args["repo"], account_id=account_id)
+        # Issue/PR Mutations
+        elif tool_name == "github_update_issue":
+            return _update_issue(
+                args["repo"], args["number"],
+                title=args.get("title"),
+                body=args.get("body"),
+                state=args.get("state"),
+                labels=args.get("labels"),
+                assignees=args.get("assignees"),
+                account_id=account_id,
+            )
+        elif tool_name == "github_update_pr":
+            return _update_pr(
+                args["repo"], args["number"],
+                title=args.get("title"),
+                body=args.get("body"),
+                state=args.get("state"),
+                base=args.get("base"),
+                account_id=account_id,
+            )
+        elif tool_name == "github_create_review":
+            return _create_review(
+                args["repo"], args["number"], args["event"],
+                body=args.get("body", ""),
+                account_id=account_id,
+            )
+        elif tool_name == "github_request_reviewers":
+            return _request_reviewers(
+                args["repo"], args["number"],
+                reviewers=args.get("reviewers"),
+                team_reviewers=args.get("team_reviewers"),
+                account_id=account_id,
+            )
+        # Diff & Comparison
+        elif tool_name == "github_compare":
+            return _compare(args["repo"], args["base"], args["head"], account_id=account_id)
+        # Workflows & CI
+        elif tool_name == "github_trigger_workflow":
+            return _trigger_workflow(
+                args["repo"], args["workflow_id"],
+                ref=args.get("ref"),
+                inputs=args.get("inputs"),
+                account_id=account_id,
+            )
+        elif tool_name == "github_list_workflow_definitions":
+            return _list_workflow_definitions(args["repo"], account_id=account_id)
+        # User & Meta
+        elif tool_name == "github_get_me":
+            return _get_me(account_id=account_id)
+        elif tool_name == "github_get_repo_tree":
+            return _get_repo_tree(
+                args["repo"],
+                ref=args.get("ref"),
+                recursive=args.get("recursive", True),
+                account_id=account_id,
+            )
+        elif tool_name == "github_list_tags":
+            return _list_tags(args["repo"], max_results=args.get("max_results", 20), account_id=account_id)
+        # Gists
+        elif tool_name == "github_list_gists":
+            return _list_gists(max_results=args.get("max_results", 10), account_id=account_id)
+        elif tool_name == "github_create_gist":
+            return _create_gist(
+                args["files"],
+                description=args.get("description", ""),
+                public=args.get("public", False),
+                account_id=account_id,
+            )
+        # Releases & Stars
+        elif tool_name == "github_create_release":
+            return _create_release(
+                args["repo"], args["tag"],
+                name=args.get("name"),
+                body=args.get("body", ""),
+                draft=args.get("draft", False),
+                prerelease=args.get("prerelease", False),
+                account_id=account_id,
+            )
+        elif tool_name == "github_star_repo":
+            return _star_repo(args["repo"], unstar=args.get("unstar", False), account_id=account_id)
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:
