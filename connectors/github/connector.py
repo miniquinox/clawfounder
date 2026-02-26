@@ -14,8 +14,21 @@ SUPPORTS_MULTI_ACCOUNT = True
 
 
 def is_connected() -> bool:
-    """Return True if GITHUB_TOKEN is set."""
-    return bool(os.environ.get("GITHUB_TOKEN"))
+    """Return True if any GitHub token is available (base or account-specific)."""
+    if os.environ.get("GITHUB_TOKEN"):
+        return True
+    # Check account-specific tokens from the registry
+    accounts_file = Path.home() / ".clawfounder" / "accounts.json"
+    if accounts_file.exists():
+        try:
+            registry = json.loads(accounts_file.read_text())
+            for acct in registry.get("accounts", {}).get("github", []):
+                env_key = acct.get("env_key", "")
+                if env_key and os.environ.get(env_key):
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 # ─── Tool Definitions ──────────────────────────────────────────
@@ -940,10 +953,29 @@ TOOLS = [
 # ─── Helpers ────────────────────────────────────────────────────
 
 def _resolve_env_key(account_id=None):
-    """Resolve the env var name for the given account."""
-    if account_id is None or account_id == "default":
-        return "GITHUB_TOKEN"
+    """Resolve the env var name for the given account.
+
+    Priority when no account_id is given:
+    1. Registered account keys from accounts.json (smart multi-account)
+    2. Base GITHUB_TOKEN (legacy / no accounts registered)
+    """
     accounts_file = Path.home() / ".clawfounder" / "accounts.json"
+
+    if account_id is None or account_id == "default":
+        # Prefer registered account keys — they are the source of truth
+        if accounts_file.exists():
+            try:
+                registry = json.loads(accounts_file.read_text())
+                for acct in registry.get("accounts", {}).get("github", []):
+                    env_key = acct.get("env_key", "")
+                    if env_key and os.environ.get(env_key):
+                        return env_key
+            except Exception:
+                pass
+        # Fall back to base key (no accounts registered yet)
+        return "GITHUB_TOKEN"
+
+    # Specific account requested — look up its key
     if accounts_file.exists():
         try:
             registry = json.loads(accounts_file.read_text())
@@ -973,7 +1005,7 @@ def _get_github(account_id=None):
 def _list_repos(max_results: int = 10, visibility: str = "all", account_id=None) -> str:
     g = _get_github(account_id)
     repos = []
-    kwargs = {"sort": "updated"}
+    kwargs = {"sort": "updated", "affiliation": "owner,collaborator,organization_member"}
     if visibility and visibility != "all":
         kwargs["visibility"] = visibility
     for repo in g.get_user().get_repos(**kwargs)[:max_results]:

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ChatView from './ChatView'
+import BriefingView from './BriefingView'
 
 const CONNECTOR_META = {
   gmail: { emoji: '📧', label: 'Gmail', color: '#ea4335' },
@@ -502,6 +503,11 @@ function GmailClientSetup({ onSaved }) {
 }
 
 function AccountList({ connectorName, accounts, onRefresh, isEmailConnector = false }) {
+  const [editingAcct, setEditingAcct] = useState(null)
+  const [editValues, setEditValues] = useState({})
+  const [editSaving, setEditSaving] = useState(false)
+  const [editSaved, setEditSaved] = useState(false)
+
   if (!accounts || accounts.length === 0) return null
 
   const allEnabled = accounts.every(a => a.enabled)
@@ -544,6 +550,65 @@ function AccountList({ connectorName, accounts, onRefresh, isEmailConnector = fa
     onRefresh()
   }
 
+  const startEditing = (acct) => {
+    setEditingAcct(acct.id)
+    setEditValues({})
+    setEditSaved(false)
+  }
+
+  const getEnvKeys = (acct) => {
+    if (acct.env_key) return [acct.env_key]
+    if (acct.env_keys) return Object.values(acct.env_keys)
+    return []
+  }
+
+  const getEnvKeyLabels = (acct) => {
+    if (acct.env_key) return { [acct.env_key]: acct.env_key }
+    if (acct.env_keys) {
+      const labels = {}
+      for (const [base, actual] of Object.entries(acct.env_keys)) {
+        labels[actual] = base
+      }
+      return labels
+    }
+    return {}
+  }
+
+  const handleEditSave = async (acct) => {
+    const keys = getEnvKeys(acct)
+    const updates = {}
+    const suffix = acct.id ? `_${acct.id.toUpperCase().replace(/-/g, '_')}` : ''
+    for (const key of keys) {
+      if (editValues[key]) {
+        updates[key] = editValues[key]
+        // Also update the base env key when this is the only account
+        // (e.g., GITHUB_TOKEN_PERSONAL → also update GITHUB_TOKEN)
+        if (suffix && key.endsWith(suffix) && accounts.length === 1) {
+          const baseKey = key.slice(0, -suffix.length)
+          if (baseKey) updates[baseKey] = editValues[key]
+        }
+      }
+    }
+    if (Object.keys(updates).length === 0) return
+
+    setEditSaving(true)
+    try {
+      await fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      })
+      setEditSaved(true)
+      setTimeout(() => {
+        setEditSaved(false)
+        setEditingAcct(null)
+        setEditValues({})
+      }, 1500)
+      onRefresh()
+    } catch {}
+    setEditSaving(false)
+  }
+
   return (
     <div className="space-y-2">
       {/* Header with Select All */}
@@ -562,40 +627,98 @@ function AccountList({ connectorName, accounts, onRefresh, isEmailConnector = fa
       </div>
 
       {/* Account rows */}
-      {accounts.map(acct => (
-        <div key={acct.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg border transition-all
-          ${acct.connected ? 'border-white/5 bg-white/[0.02]' : 'border-white/5 bg-white/[0.01] opacity-60'}`}>
-          <input
-            type="checkbox"
-            checked={acct.enabled}
-            onChange={e => handleToggle(acct.id, e.target.checked)}
-            className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 accent-accent cursor-pointer"
-          />
-          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${acct.connected ? 'bg-success' : 'bg-claw-600'}`} />
-          <div className="flex-1 min-w-0">
-            <div className="text-xs text-white truncate">{acct.label || acct.id}</div>
-            {acct.id !== acct.label && (
-              <div className="text-[10px] text-claw-500 truncate">{acct.id}</div>
+      {accounts.map(acct => {
+        const isEditing = editingAcct === acct.id
+        const envKeys = getEnvKeys(acct)
+        const envLabels = getEnvKeyLabels(acct)
+        const canEdit = !isEmailConnector && acct.connected && envKeys.length > 0
+
+        return (
+          <div key={acct.id} className={`rounded-lg border transition-all
+            ${acct.connected ? 'border-white/5 bg-white/[0.02]' : 'border-white/5 bg-white/[0.01] opacity-60'}`}>
+            <div className="flex items-center gap-3 px-3 py-2">
+              <input
+                type="checkbox"
+                checked={acct.enabled}
+                onChange={e => handleToggle(acct.id, e.target.checked)}
+                className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 accent-accent cursor-pointer"
+              />
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${acct.connected ? 'bg-success' : 'bg-claw-600'}`} />
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-white truncate">{acct.label || acct.id}</div>
+                {acct.id !== acct.label && (
+                  <div className="text-[10px] text-claw-500 truncate">{acct.id}</div>
+                )}
+              </div>
+              <div className="flex items-center gap-1 flex-shrink-0">
+                {canEdit && (
+                  <button onClick={() => isEditing ? setEditingAcct(null) : startEditing(acct)}
+                    className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                      isEditing ? 'text-accent-light bg-accent/10' : 'text-claw-500 hover:text-claw-200'
+                    }`}
+                    title="Edit credentials">
+                    Edit
+                  </button>
+                )}
+                {acct.connected && (
+                  <button onClick={() => handleDisconnect(acct.id)}
+                    className="text-[10px] text-claw-500 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
+                    title="Disconnect">
+                    Disconnect
+                  </button>
+                )}
+                {acct.id !== 'default' && (
+                  <button onClick={() => handleRemove(acct.id)}
+                    className="text-[10px] text-claw-500 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
+                    title="Remove account">
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Inline edit form */}
+            {isEditing && (
+              <div className="px-3 pb-3 pt-1 border-t border-white/5 space-y-2">
+                {envKeys.map(key => (
+                  <div key={key}>
+                    <label className="text-[10px] text-claw-500 mb-1 block">
+                      <code className="text-accent-light/70">{envLabels[key] || key}</code>
+                    </label>
+                    <input
+                      type="password"
+                      placeholder="Enter new value..."
+                      value={editValues[key] ?? ''}
+                      onChange={e => setEditValues(prev => ({ ...prev, [key]: e.target.value }))}
+                      className="w-full bg-claw-900/60 border border-white/10 rounded-lg px-2.5 py-1.5 text-xs text-claw-100
+                        placeholder:text-claw-600 focus:outline-none focus:border-accent/40 transition-all"
+                    />
+                  </div>
+                ))}
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={() => handleEditSave(acct)}
+                    disabled={editSaving || Object.values(editValues).every(v => !v)}
+                    className="px-3 py-1.5 rounded-lg text-[11px] font-medium bg-accent/20 text-accent-light
+                      hover:bg-accent/30 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                  >
+                    {editSaving ? 'Saving...' : 'Update'}
+                  </button>
+                  <button
+                    onClick={() => { setEditingAcct(null); setEditValues({}) }}
+                    className="px-3 py-1.5 rounded-lg text-[11px] text-claw-400 hover:text-claw-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  {editSaved && (
+                    <span className="text-[11px] text-green-400">Updated!</span>
+                  )}
+                </div>
+              </div>
             )}
           </div>
-          <div className="flex items-center gap-1 flex-shrink-0">
-            {acct.connected && (
-              <button onClick={() => handleDisconnect(acct.id)}
-                className="text-[10px] text-claw-500 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
-                title="Disconnect">
-                Disconnect
-              </button>
-            )}
-            {acct.id !== 'default' && (
-              <button onClick={() => handleRemove(acct.id)}
-                className="text-[10px] text-claw-500 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
-                title="Remove account">
-                Remove
-              </button>
-            )}
-          </div>
-        </div>
-      ))}
+        )
+      })}
 
       {/* Disconnect All */}
       {accounts.filter(a => a.connected).length >= 2 && (
@@ -1048,6 +1171,7 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
 
 export default function App() {
   const [tab, setTab] = useState('connect')
+  const [chatPrefill, setChatPrefill] = useState(null)
   const [connectors, setConnectors] = useState([])
   const [config, setConfig] = useState({})
   const [isSetConfig, setIsSetConfig] = useState({})
@@ -1157,6 +1281,15 @@ export default function App() {
               <span>⚙️</span> Connect
             </button>
             <button
+              onClick={() => setTab('briefing')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
+                ${tab === 'briefing'
+                  ? 'bg-accent/20 text-accent-light shadow-sm'
+                  : 'text-claw-400 hover:text-claw-200'}`}
+            >
+              <span>📋</span> Briefing
+            </button>
+            <button
               onClick={() => setTab('chat')}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
                 ${tab === 'chat'
@@ -1169,8 +1302,18 @@ export default function App() {
         </div>
       </header>
 
+      {/* Briefing Tab */}
+      {tab === 'briefing' && (
+        <BriefingView
+          onSwitchToChat={(message) => {
+            setChatPrefill(message)
+            setTab('chat')
+          }}
+        />
+      )}
+
       {/* Chat Tab */}
-      {tab === 'chat' && <ChatView />}
+      {tab === 'chat' && <ChatView prefillMessage={chatPrefill} onPrefillConsumed={() => setChatPrefill(null)} />}
 
       {/* Connect Tab */}
       {tab === 'connect' && (

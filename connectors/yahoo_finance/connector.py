@@ -45,6 +45,24 @@ TOOLS = [
             "required": ["symbol"],
         },
     },
+    {
+        "name": "yahoo_finance_search",
+        "description": "Search for stocks by company name or partial ticker. Returns matching symbols with exchange and type info.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Company name or partial ticker (e.g., 'apple', 'micro', 'tsla')",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Max results to return (default: 5)",
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -95,12 +113,33 @@ def _get_history(symbol: str, period: str = "1mo") -> str:
     return json.dumps(records, indent=2, default=str)
 
 
+def _search(query: str, max_results: int = 5) -> str:
+    try:
+        import yfinance as yf
+    except ImportError:
+        raise ImportError("yfinance not installed. Run: bash connectors/yahoo_finance/install.sh")
+
+    results = yf.Search(query, max_results=max_results)
+    matches = []
+    for q in (results.quotes or []):
+        matches.append({
+            "symbol": q.get("symbol", ""),
+            "name": q.get("longname", q.get("shortname", "")),
+            "exchange": q.get("exchDisp", q.get("exchange", "")),
+            "type": q.get("typeDisp", q.get("quoteType", "")),
+            "sector": q.get("sectorDisp", ""),
+        })
+    return json.dumps(matches, indent=2)
+
+
 def handle(tool_name: str, args: dict) -> str:
     try:
         if tool_name == "yahoo_finance_quote":
             return _get_quote(args["symbol"])
         elif tool_name == "yahoo_finance_history":
             return _get_history(args["symbol"], args.get("period", "1mo"))
+        elif tool_name == "yahoo_finance_search":
+            return _search(args["query"], args.get("max_results", 5))
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:

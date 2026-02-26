@@ -26,6 +26,7 @@ const GMAIL_WORK_TOKEN = path.join(os.homedir(), '.clawfounder', 'gmail_work.jso
 
 const CLAWFOUNDER_DIR = path.join(os.homedir(), '.clawfounder');
 const ACCOUNTS_FILE = path.join(CLAWFOUNDER_DIR, 'accounts.json');
+const BRIEFING_CONFIG_FILE = path.join(CLAWFOUNDER_DIR, 'briefing_config.json');
 
 const app = express();
 app.use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }));
@@ -1246,6 +1247,183 @@ app.post('/api/chat', (req, res) => {
     res.on('close', () => {
         if (!processExited) {
             console.log('[chat] Client disconnected, killing process');
+            proc.kill();
+        }
+    });
+});
+
+// ── Briefing config endpoints ──────────────────────────────────
+
+app.get('/api/briefing/config', (req, res) => {
+    try {
+        if (fs.existsSync(BRIEFING_CONFIG_FILE)) {
+            const data = JSON.parse(fs.readFileSync(BRIEFING_CONFIG_FILE, 'utf-8'));
+            return res.json(data);
+        }
+    } catch (err) {
+        console.error('[briefing/config] Read error:', err.message);
+    }
+    res.json({ version: 1, connectors: {} });
+});
+
+app.post('/api/briefing/config', (req, res) => {
+    try {
+        if (!fs.existsSync(CLAWFOUNDER_DIR)) {
+            fs.mkdirSync(CLAWFOUNDER_DIR, { recursive: true });
+        }
+        const config = { version: 1, ...req.body };
+        fs.writeFileSync(BRIEFING_CONFIG_FILE, JSON.stringify(config, null, 2));
+        res.json({ ok: true });
+    } catch (err) {
+        console.error('[briefing/config] Write error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Yahoo Finance ticker search ─────────────────────────────────
+
+app.get('/api/yahoo/search', (req, res) => {
+    const q = (req.query.q || '').trim();
+    if (!q) return res.json({ results: [] });
+
+    const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+    const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython : fs.existsSync(venvPython) ? venvPython : 'python3';
+
+    const script = `
+import sys, json
+sys.path.insert(0, "${PROJECT_ROOT.replace(/\\/g, '\\\\')}")
+from connectors.yahoo_finance.connector import handle
+result = handle("yahoo_finance_search", {"query": ${JSON.stringify(q)}, "max_results": 8})
+print(result)
+`;
+    const proc = spawn(pythonCmd, ['-c', script], { cwd: PROJECT_ROOT });
+
+    let out = '';
+    let err = '';
+    proc.stdout.on('data', d => out += d.toString());
+    proc.stderr.on('data', d => err += d.toString());
+    proc.on('close', (code) => {
+        if (code !== 0) {
+            console.error('[yahoo/search] Error:', err);
+            return res.status(500).json({ error: err || 'Search failed' });
+        }
+        try {
+            res.json({ results: JSON.parse(out) });
+        } catch {
+            res.status(500).json({ error: 'Failed to parse search results' });
+        }
+    });
+});
+
+// ── GitHub repos helper (for briefing settings) ────────────────
+
+app.get('/api/github/repos', (req, res) => {
+    const envVars = { ...process.env, ...readEnv() };
+    const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+    const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython : fs.existsSync(venvPython) ? venvPython : 'python3';
+
+    // Pass account_id if provided — connector will resolve the right token
+    const accountId = req.query.account_id || '';
+    const acctArg = accountId ? `, account_id="${accountId}"` : '';
+    const script = `
+import sys, json
+sys.path.insert(0, "${PROJECT_ROOT.replace(/\\/g, '\\\\')}")
+from connectors.github.connector import handle
+result = handle("github_list_repos", {"max_results": 100}${acctArg})
+print(result)
+`;
+    const proc = spawn(pythonCmd, ['-c', script], {
+        cwd: PROJECT_ROOT,
+        env: envVars,
+    });
+
+    let out = '';
+    let err = '';
+    proc.stdout.on('data', d => out += d.toString());
+    proc.stderr.on('data', d => err += d.toString());
+    proc.on('close', (code) => {
+        if (code !== 0) {
+            console.error('[github/repos] Error:', err);
+            return res.status(500).json({ error: err || 'Failed to fetch repos' });
+        }
+        try {
+            res.json({ repos: JSON.parse(out) });
+        } catch {
+            res.status(500).json({ error: 'Failed to parse repo list' });
+        }
+    });
+});
+
+// ── Briefing SSE endpoint ───────────────────────────────────────
+
+app.post('/api/briefing', (req, res) => {
+    const { provider, briefing_config } = req.body;
+    console.log(`[briefing] Generating briefing with provider=${provider}`);
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    const envVars = { ...process.env, ...readEnv() };
+    const pyScript = path.join(__dirname, 'briefing_agent.py');
+    const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+    const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython : fs.existsSync(venvPython) ? venvPython : 'python3';
+
+    const proc = spawn(pythonCmd, [pyScript], {
+        cwd: PROJECT_ROOT,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: envVars,
+    });
+
+    let processExited = false;
+
+    proc.on('error', (err) => {
+        console.error('[briefing] Spawn error:', err);
+        res.write(`data: ${JSON.stringify({ type: 'error', error: `Spawn error: ${err.message}` })}\n\n`);
+        res.end();
+    });
+
+    proc.stdin.write(JSON.stringify({
+        provider: provider || 'gemini',
+        briefing_config: briefing_config || {},
+    }));
+    proc.stdin.end();
+
+    let buffer = '';
+    proc.stdout.on('data', (data) => {
+        const chunk = data.toString();
+        buffer += chunk;
+        const lines = buffer.split('\n');
+        buffer = lines.pop();
+        for (const line of lines) {
+            if (line.trim()) {
+                res.write(`data: ${line}\n\n`);
+            }
+        }
+    });
+
+    proc.stderr.on('data', (data) => {
+        console.error('[briefing stderr]', data.toString().trim());
+    });
+
+    proc.on('close', (code) => {
+        processExited = true;
+        console.log(`[briefing] Process exited with code ${code}`);
+        if (buffer.trim()) {
+            res.write(`data: ${buffer}\n\n`);
+        }
+        res.write(`data: ${JSON.stringify({ type: 'done' })}\n\n`);
+        res.end();
+    });
+
+    res.on('close', () => {
+        if (!processExited) {
+            console.log('[briefing] Client disconnected, killing process');
             proc.kill();
         }
     });

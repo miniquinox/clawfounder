@@ -133,7 +133,7 @@ function MessageBubble({ msg }) {
     )
 }
 
-export default function ChatView() {
+export default function ChatView({ prefillMessage, onPrefillConsumed }) {
     const [providers, setProviders] = useState([])
     const [selectedProvider, setSelectedProvider] = useState('')
     const [messages, setMessages] = useState([])
@@ -150,6 +150,14 @@ export default function ChatView() {
             }
         })
     }, [])
+
+    // Handle prefilled message from Briefing view
+    useEffect(() => {
+        if (prefillMessage && !isStreaming) {
+            setInput(prefillMessage)
+            onPrefillConsumed?.()
+        }
+    }, [prefillMessage, isStreaming, onPrefillConsumed])
 
     const scrollToBottom = useCallback(() => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
