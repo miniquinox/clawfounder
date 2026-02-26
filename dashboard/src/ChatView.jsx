@@ -102,9 +102,12 @@ function MessageBubble({ msg }) {
                                         li: ({ children }) => <li className="text-claw-200">{children}</li>,
                                         strong: ({ children }) => <strong className="font-semibold text-claw-50">{children}</strong>,
                                         em: ({ children }) => <em className="italic text-claw-200">{children}</em>,
-                                        code: ({ inline, children }) => inline
-                                            ? <code className="bg-white/10 text-accent-light px-1.5 py-0.5 rounded text-xs font-mono">{children}</code>
-                                            : <pre className="bg-claw-900/60 rounded-lg px-3 py-2 my-2 overflow-x-auto"><code className="text-xs text-claw-200 font-mono">{children}</code></pre>,
+                                        pre: ({ children }) => (
+                                            <pre className="bg-claw-900/60 rounded-lg px-3 py-2 my-2 overflow-x-auto [&>code]:bg-transparent [&>code]:p-0 [&>code]:rounded-none [&>code]:text-xs [&>code]:text-claw-200">{children}</pre>
+                                        ),
+                                        code: ({ children }) => (
+                                            <code className="bg-white/10 text-accent-light px-1.5 py-0.5 rounded text-xs font-mono">{children}</code>
+                                        ),
                                         a: ({ href, children }) => <a href={href} target="_blank" rel="noopener noreferrer" className="text-accent-light hover:underline">{children}</a>,
                                         blockquote: ({ children }) => <blockquote className="border-l-2 border-accent/40 pl-3 my-2 text-claw-300 italic">{children}</blockquote>,
                                         hr: () => <hr className="border-white/10 my-3" />,

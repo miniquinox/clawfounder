@@ -1,12 +1,13 @@
 # Telegram Connector
 
-Connects ClawFounder to Telegram using the [python-telegram-bot](https://python-telegram-bot.org/) library.
+Connects ClawFounder to Telegram using the Telegram Bot API via HTTP requests.
 
 ## What It Does
 
-- Send messages to a chat
-- Get recent messages from a chat
-- Send files/documents
+- Send text messages, photos, documents, and locations
+- Get recent incoming messages
+- Forward, edit, delete, and pin messages
+- Get chat/group/channel info
 
 ## Authentication
 
@@ -29,12 +30,20 @@ cd connectors/telegram
 bash install.sh
 ```
 
-## Available Tools
+## Available Tools (10)
 
 | Tool | Description |
 |---|---|
 | `telegram_send_message` | Send a text message to a Telegram chat |
 | `telegram_get_updates` | Get recent incoming messages |
+| `telegram_send_photo` | Send a photo by URL or file_id, with optional caption |
+| `telegram_send_document` | Send a document/file by URL or file_id, with optional caption |
+| `telegram_send_location` | Send a GPS location to a chat |
+| `telegram_forward_message` | Forward a message from one chat to another |
+| `telegram_edit_message` | Edit a previously sent text message |
+| `telegram_delete_message` | Delete a message from a chat |
+| `telegram_pin_message` | Pin a message in a chat |
+| `telegram_get_chat` | Get info about a chat/group/channel (title, type, description) |
 
 ## Testing
 
