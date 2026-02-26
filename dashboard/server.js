@@ -504,11 +504,12 @@ app.post('/api/work-email/login', (req, res) => {
             }
         };
 
-        // 1. Detect quota project (fast — just reads config/env)
-        let quotaProject = null;
-        const env = readEnv();
-        if (env['FIREBASE_PROJECT_ID']) quotaProject = env['FIREBASE_PROJECT_ID'];
-        if (!quotaProject) quotaProject = run('gcloud config get-value project 2>/dev/null');
+        // 1. Detect quota project — prefer gcloud config project (where Gmail API is enabled)
+        let quotaProject = run('gcloud config get-value project 2>/dev/null');
+        if (!quotaProject) {
+            const env = readEnv();
+            if (env['FIREBASE_PROJECT_ID']) quotaProject = env['FIREBASE_PROJECT_ID'];
+        }
 
         // 2. Read ADC file and save token IMMEDIATELY (so UI detects login)
         let adcData;

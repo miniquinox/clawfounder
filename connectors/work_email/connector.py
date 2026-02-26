@@ -138,7 +138,8 @@ def _get_gmail_service():
         if quota_project:
             creds = creds.with_quota_project(quota_project)
 
-        if creds.expired and creds.refresh_token:
+        # Always refresh if not valid (ADC tokens may have no initial token)
+        if not creds.valid and creds.refresh_token:
             creds.refresh(Request())
 
         if creds and creds.valid:
