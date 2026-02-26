@@ -67,7 +67,9 @@ def load_all_connectors():
 
 
 def build_system_prompt(connectors):
-    """Build a rich system prompt from the loaded connectors."""
+    """Build a rich system prompt from the loaded connectors and their instructions."""
+    connectors_dir = PROJECT_ROOT / "connectors"
+
     lines = [
         "You are ClawFounder 🦀 — a personal AI agent that takes real actions "
         "using connected services. Be concise and helpful.",
@@ -80,37 +82,32 @@ def build_system_prompt(connectors):
         "",
     ]
 
-    # Build connector reference
+    # Include each connector's instructions.md (the source of truth for tool usage)
     if connectors:
-        lines.append("## Connected Services & Tools")
-        for conn_name, module in sorted(connectors.items()):
-            tool_names = [t["name"] for t in module.TOOLS]
-            desc = module.__doc__.strip().split("\n")[0] if module.__doc__ else conn_name
-            lines.append(f"- **{conn_name}**: {desc}")
-            for tool in module.TOOLS:
-                lines.append(f"  - `{tool['name']}`: {tool['description'][:120]}")
+        lines.append("## Connected Services")
         lines.append("")
+        for conn_name in sorted(connectors.keys()):
+            instructions_file = connectors_dir / conn_name / "instructions.md"
+            if instructions_file.exists():
+                try:
+                    content = instructions_file.read_text().strip()
+                    lines.append(f"### {conn_name}")
+                    lines.append(content)
+                    lines.append("")
+                except Exception:
+                    pass
 
-    # Special guidance for email connectors
-    has_gmail = "gmail" in connectors
-    has_work = "work_email" in connectors
-    if has_gmail or has_work:
-        lines.append("## Email Guidance")
-        if has_gmail and has_work:
+        # If both email connectors are active, add disambiguation guidance
+        if "gmail" in connectors and "work_email" in connectors:
+            lines.append("### Email Disambiguation")
             lines.append(
-                "The user has TWO email accounts. Use `gmail_*` tools for their personal "
-                "email and `work_email_*` tools for their work/company email. "
+                "The user has TWO email accounts connected. "
+                "Use `gmail_*` tools for their personal email and `work_email_*` tools for their work/company email. "
                 "When the user says 'my email' without specifying, ask which one. "
                 "When they say 'personal', 'Gmail', or 'personal email' → use gmail_* tools. "
                 "When they say 'work', 'work email', 'company email', or 'workspace' → use work_email_* tools."
             )
-        lines.append(
-            "To find drafts use search with query 'in:drafts'. "
-            "To find sent emails use 'in:sent'. "
-            "To find starred emails use 'is:starred'. "
-            "Always use the search tool for these — don't say you can't do it."
-        )
-        lines.append("")
+            lines.append("")
 
     return "\n".join(lines)
 

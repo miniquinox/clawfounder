@@ -28,3 +28,16 @@ This is only needed once. After that, just click "Sign in with Google".
 | `gmail_search` | Search emails with Gmail query syntax |
 | `gmail_read_email` | Read full email body by ID |
 | `gmail_send` | Send an email |
+
+## Search Query Examples
+
+| Query | What it finds |
+|-------|---------------|
+| `in:drafts` | Draft emails |
+| `in:sent` | Sent emails |
+| `is:starred` | Starred emails |
+| `from:john@example.com` | Emails from a specific sender |
+| `subject:meeting` | Emails with "meeting" in the subject |
+| `newer_than:7d` | Emails from the last 7 days |
+| `has:attachment filename:pdf` | Emails with PDF attachments |
+| `label:important` | Important emails |
