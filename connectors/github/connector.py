@@ -4,6 +4,9 @@ GitHub connector — Repos, commits, issues, and PRs via the GitHub API.
 
 import os
 import json
+from pathlib import Path
+
+SUPPORTS_MULTI_ACCOUNT = True
 
 
 def is_connected() -> bool:
@@ -86,20 +89,37 @@ TOOLS = [
 ]
 
 
-def _get_github():
+def _resolve_env_key(account_id=None):
+    """Resolve the env var name for the given account."""
+    if account_id is None or account_id == "default":
+        return "GITHUB_TOKEN"
+    accounts_file = Path.home() / ".clawfounder" / "accounts.json"
+    if accounts_file.exists():
+        try:
+            registry = json.loads(accounts_file.read_text())
+            for acct in registry.get("accounts", {}).get("github", []):
+                if acct["id"] == account_id and "env_key" in acct:
+                    return acct["env_key"]
+        except Exception:
+            pass
+    return f"GITHUB_TOKEN_{account_id.upper()}"
+
+
+def _get_github(account_id=None):
     try:
         from github import Github
     except ImportError:
         raise ImportError("PyGithub not installed. Run: bash connectors/github/install.sh")
 
-    token = os.environ.get("GITHUB_TOKEN")
+    env_key = _resolve_env_key(account_id)
+    token = os.environ.get(env_key)
     if not token:
-        raise ValueError("GITHUB_TOKEN not set. Add it to your .env file.")
+        raise ValueError(f"{env_key} not set. Add it to your .env file.")
     return Github(token)
 
 
-def _list_repos(max_results: int = 10) -> str:
-    g = _get_github()
+def _list_repos(max_results: int = 10, account_id=None) -> str:
+    g = _get_github(account_id)
     repos = []
     for repo in g.get_user().get_repos(sort="updated")[:max_results]:
         repos.append({
@@ -112,8 +132,8 @@ def _list_repos(max_results: int = 10) -> str:
     return json.dumps(repos, indent=2)
 
 
-def _get_commits(repo: str, max_results: int = 5) -> str:
-    g = _get_github()
+def _get_commits(repo: str, max_results: int = 5, account_id=None) -> str:
+    g = _get_github(account_id)
     r = g.get_repo(repo)
     commits = []
     for commit in r.get_commits()[:max_results]:
@@ -126,8 +146,8 @@ def _get_commits(repo: str, max_results: int = 5) -> str:
     return json.dumps(commits, indent=2)
 
 
-def _list_issues(repo: str, max_results: int = 10) -> str:
-    g = _get_github()
+def _list_issues(repo: str, max_results: int = 10, account_id=None) -> str:
+    g = _get_github(account_id)
     r = g.get_repo(repo)
     issues = []
     for issue in r.get_issues(state="open")[:max_results]:
@@ -141,23 +161,23 @@ def _list_issues(repo: str, max_results: int = 10) -> str:
     return json.dumps(issues, indent=2)
 
 
-def _create_issue(repo: str, title: str, body: str = "") -> str:
-    g = _get_github()
+def _create_issue(repo: str, title: str, body: str = "", account_id=None) -> str:
+    g = _get_github(account_id)
     r = g.get_repo(repo)
     issue = r.create_issue(title=title, body=body)
     return f"Issue created: #{issue.number} — {issue.title} ({issue.html_url})"
 
 
-def handle(tool_name: str, args: dict) -> str:
+def handle(tool_name: str, args: dict, account_id: str = None) -> str:
     try:
         if tool_name == "github_list_repos":
-            return _list_repos(args.get("max_results", 10))
+            return _list_repos(args.get("max_results", 10), account_id=account_id)
         elif tool_name == "github_get_commits":
-            return _get_commits(args["repo"], args.get("max_results", 5))
+            return _get_commits(args["repo"], args.get("max_results", 5), account_id=account_id)
         elif tool_name == "github_list_issues":
-            return _list_issues(args["repo"], args.get("max_results", 10))
+            return _list_issues(args["repo"], args.get("max_results", 10), account_id=account_id)
         elif tool_name == "github_create_issue":
-            return _create_issue(args["repo"], args["title"], args.get("body", ""))
+            return _create_issue(args["repo"], args["title"], args.get("body", ""), account_id=account_id)
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:

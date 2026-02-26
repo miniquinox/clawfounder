@@ -4,6 +4,9 @@ Supabase connector — Query tables, insert data, and run SQL.
 
 import os
 import json
+from pathlib import Path
+
+SUPPORTS_MULTI_ACCOUNT = True
 
 
 def is_connected() -> bool:
@@ -73,21 +76,40 @@ TOOLS = [
 ]
 
 
-def _get_client():
+def _resolve_env_keys(account_id=None):
+    """Resolve the env var names for the given account."""
+    if account_id is None or account_id == "default":
+        return "SUPABASE_URL", "SUPABASE_SERVICE_KEY"
+    accounts_file = Path.home() / ".clawfounder" / "accounts.json"
+    if accounts_file.exists():
+        try:
+            registry = json.loads(accounts_file.read_text())
+            for acct in registry.get("accounts", {}).get("supabase", []):
+                if acct["id"] == account_id and "env_keys" in acct:
+                    keys = acct["env_keys"]
+                    return keys.get("SUPABASE_URL", f"SUPABASE_URL_{account_id.upper()}"), \
+                           keys.get("SUPABASE_SERVICE_KEY", f"SUPABASE_SERVICE_KEY_{account_id.upper()}")
+        except Exception:
+            pass
+    return f"SUPABASE_URL_{account_id.upper()}", f"SUPABASE_SERVICE_KEY_{account_id.upper()}"
+
+
+def _get_client(account_id=None):
     try:
         from supabase import create_client
     except ImportError:
         raise ImportError("supabase-py not installed. Run: bash connectors/supabase/install.sh")
 
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
+    url_key, key_key = _resolve_env_keys(account_id)
+    url = os.environ.get(url_key)
+    key = os.environ.get(key_key)
     if not url or not key:
-        raise ValueError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set in .env")
+        raise ValueError(f"{url_key} and {key_key} must be set in .env")
     return create_client(url, key)
 
 
-def _query(table: str, select: str = "*", limit: int = 20, filters: str = None) -> str:
-    client = _get_client()
+def _query(table: str, select: str = "*", limit: int = 20, filters: str = None, account_id=None) -> str:
+    client = _get_client(account_id)
     q = client.table(table).select(select).limit(limit)
 
     if filters:
@@ -101,8 +123,8 @@ def _query(table: str, select: str = "*", limit: int = 20, filters: str = None) 
     return json.dumps(result.data, indent=2, default=str)
 
 
-def _insert(table: str, data: str) -> str:
-    client = _get_client()
+def _insert(table: str, data: str, account_id=None) -> str:
+    client = _get_client(account_id)
     try:
         row = json.loads(data) if isinstance(data, str) else data
     except (json.JSONDecodeError, TypeError) as e:
@@ -111,7 +133,7 @@ def _insert(table: str, data: str) -> str:
     return f"Inserted {len(result.data)} row(s) into '{table}'"
 
 
-def _sql(query: str) -> str:
+def _sql(query: str, account_id=None) -> str:
     if not query.strip().upper().startswith("SELECT"):
         return "Error: Only SELECT queries are allowed for safety."
     client = _get_client()
@@ -121,7 +143,7 @@ def _sql(query: str) -> str:
     return "SQL execution requires a custom Supabase RPC function. Use supabase_query for basic queries."
 
 
-def handle(tool_name: str, args: dict) -> str:
+def handle(tool_name: str, args: dict, account_id: str = None) -> str:
     try:
         if tool_name == "supabase_query":
             return _query(
@@ -129,11 +151,12 @@ def handle(tool_name: str, args: dict) -> str:
                 args.get("select", "*"),
                 args.get("limit", 20),
                 args.get("filters"),
+                account_id=account_id,
             )
         elif tool_name == "supabase_insert":
-            return _insert(args["table"], args["data"])
+            return _insert(args["table"], args["data"], account_id=account_id)
         elif tool_name == "supabase_sql":
-            return _sql(args["query"])
+            return _sql(args["query"], account_id=account_id)
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:

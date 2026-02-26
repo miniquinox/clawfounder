@@ -273,24 +273,48 @@ function FirebaseCard({ connector, onRefresh }) {
 }
 
 function GmailClientSetup({ onSaved }) {
+  const [mode, setMode] = useState('json') // 'json' or 'manual'
+  const [jsonText, setJsonText] = useState('')
   const [clientId, setClientId] = useState('')
   const [clientSecret, setClientSecret] = useState('')
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState(null)
   const [done, setDone] = useState(false)
+  const fileInputRef = useRef(null)
+
+  const handleJsonFile = (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = (ev) => setJsonText(ev.target.result)
+    reader.readAsText(file)
+  }
 
   const handleSave = async () => {
-    if (!clientId.trim() || !clientSecret.trim()) {
-      setError('Both Client ID and Client Secret are required.')
-      return
-    }
     setSaving(true)
     setError(null)
     try {
+      let body
+      if (mode === 'json') {
+        if (!jsonText.trim()) {
+          setError('Paste or upload the JSON credentials file.')
+          setSaving(false)
+          return
+        }
+        body = { json: jsonText.trim() }
+      } else {
+        if (!clientId.trim() || !clientSecret.trim()) {
+          setError('Both Client ID and Client Secret are required.')
+          setSaving(false)
+          return
+        }
+        body = { client_id: clientId.trim(), client_secret: clientSecret.trim() }
+      }
+
       const res = await fetch('/api/gmail/client-secret', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ client_id: clientId.trim(), client_secret: clientSecret.trim() }),
+        body: JSON.stringify(body),
       })
       const data = await res.json()
       if (data.error) throw new Error(data.error)
@@ -331,27 +355,67 @@ function GmailClientSetup({ onSaved }) {
             <li>Under "Test users", add <strong>your personal Gmail address</strong></li>
             <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener"
               className="underline hover:text-blue-100">Credentials</a> → Create → <strong>OAuth 2.0 Client ID</strong> → <strong>Desktop app</strong></li>
-            <li>Copy the <strong>Client ID</strong> and <strong>Client Secret</strong> below</li>
+            <li>Download the <strong>JSON</strong> file (or copy Client ID & Secret)</li>
           </ol>
         </div>
 
+        {/* Mode toggle */}
+        <div className="flex gap-1 p-0.5 rounded-lg bg-white/[0.04] border border-white/5 w-fit">
+          <button onClick={() => setMode('json')}
+            className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all
+              ${mode === 'json' ? 'bg-accent/20 text-accent-light' : 'text-claw-400 hover:text-claw-200'}`}>
+            Upload JSON
+          </button>
+          <button onClick={() => setMode('manual')}
+            className={`px-3 py-1 rounded-md text-[11px] font-medium transition-all
+              ${mode === 'manual' ? 'bg-accent/20 text-accent-light' : 'text-claw-400 hover:text-claw-200'}`}>
+            Enter Manually
+          </button>
+        </div>
+
         <div className="space-y-2">
-          <input
-            type="text"
-            value={clientId}
-            onChange={(e) => setClientId(e.target.value)}
-            placeholder="Client ID (e.g. 12345...apps.googleusercontent.com)"
-            className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
-              placeholder-claw-500 focus:outline-none focus:border-accent/50"
-          />
-          <input
-            type="password"
-            value={clientSecret}
-            onChange={(e) => setClientSecret(e.target.value)}
-            placeholder="Client Secret"
-            className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
-              placeholder-claw-500 focus:outline-none focus:border-accent/50"
-          />
+          {mode === 'json' ? (
+            <>
+              <div className="flex gap-2">
+                <button onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-2 rounded-lg text-xs font-medium bg-white/[0.06] border border-white/10
+                    text-claw-300 hover:bg-white/[0.10] hover:text-white transition-all">
+                  Choose JSON file...
+                </button>
+                <input ref={fileInputRef} type="file" accept=".json,application/json"
+                  onChange={handleJsonFile} className="hidden" />
+                {jsonText && <span className="text-[10px] text-green-400 self-center">File loaded</span>}
+              </div>
+              <div className="text-[10px] text-claw-500">or paste the JSON contents:</div>
+              <textarea
+                value={jsonText}
+                onChange={(e) => setJsonText(e.target.value)}
+                placeholder='{"installed":{"client_id":"...","client_secret":"..."}}'
+                rows={3}
+                className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white font-mono
+                  placeholder-claw-500 focus:outline-none focus:border-accent/50 resize-none"
+              />
+            </>
+          ) : (
+            <>
+              <input
+                type="text"
+                value={clientId}
+                onChange={(e) => setClientId(e.target.value)}
+                placeholder="Client ID (e.g. 12345...apps.googleusercontent.com)"
+                className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
+                  placeholder-claw-500 focus:outline-none focus:border-accent/50"
+              />
+              <input
+                type="password"
+                value={clientSecret}
+                onChange={(e) => setClientSecret(e.target.value)}
+                placeholder="Client Secret"
+                className="w-full px-3 py-2 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
+                  placeholder-claw-500 focus:outline-none focus:border-accent/50"
+              />
+            </>
+          )}
           {error && <p className="text-xs text-red-400">{error}</p>}
           <button onClick={handleSave} disabled={saving}
             className="px-4 py-2 rounded-lg text-xs font-medium transition-all
@@ -359,6 +423,207 @@ function GmailClientSetup({ onSaved }) {
             {saving ? 'Saving...' : 'Save Credentials'}
           </button>
         </div>
+      </div>
+    </div>
+  )
+}
+
+function AccountList({ connectorName, accounts, onRefresh, isEmailConnector = false }) {
+  if (!accounts || accounts.length === 0) return null
+
+  const allEnabled = accounts.every(a => a.enabled)
+  const someEnabled = accounts.some(a => a.enabled)
+
+  const handleToggle = async (acctId, enabled) => {
+    await fetch(`/api/accounts/${connectorName}/${acctId}/toggle`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    onRefresh()
+  }
+
+  const handleToggleAll = async () => {
+    const newEnabled = !allEnabled
+    await fetch(`/api/accounts/${connectorName}/toggle-all`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newEnabled }),
+    })
+    onRefresh()
+  }
+
+  const handleDisconnect = async (acctId) => {
+    if (!confirm(`Disconnect account "${acctId}"?`)) return
+    await fetch(`/api/accounts/${connectorName}/${acctId}/disconnect`, { method: 'POST' })
+    onRefresh()
+  }
+
+  const handleRemove = async (acctId) => {
+    if (!confirm(`Remove account "${acctId}"? This will delete its credentials permanently.`)) return
+    await fetch(`/api/accounts/${connectorName}/${acctId}/remove`, { method: 'POST' })
+    onRefresh()
+  }
+
+  const handleDisconnectAll = async () => {
+    if (!confirm(`Disconnect ALL ${connectorName} accounts?`)) return
+    await fetch(`/api/accounts/${connectorName}/disconnect-all`, { method: 'POST' })
+    onRefresh()
+  }
+
+  return (
+    <div className="space-y-2">
+      {/* Header with Select All */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <input
+            type="checkbox"
+            checked={allEnabled}
+            ref={el => { if (el) el.indeterminate = someEnabled && !allEnabled }}
+            onChange={handleToggleAll}
+            className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 accent-accent cursor-pointer"
+          />
+          <span className="text-xs font-medium text-claw-300">Accounts</span>
+          <span className="text-[10px] text-claw-500">({accounts.filter(a => a.enabled).length}/{accounts.length} active)</span>
+        </div>
+      </div>
+
+      {/* Account rows */}
+      {accounts.map(acct => (
+        <div key={acct.id} className={`flex items-center gap-3 px-3 py-2 rounded-lg border transition-all
+          ${acct.connected ? 'border-white/5 bg-white/[0.02]' : 'border-white/5 bg-white/[0.01] opacity-60'}`}>
+          <input
+            type="checkbox"
+            checked={acct.enabled}
+            onChange={e => handleToggle(acct.id, e.target.checked)}
+            className="w-3.5 h-3.5 rounded border-white/20 bg-white/5 accent-accent cursor-pointer"
+          />
+          <span className={`w-2 h-2 rounded-full flex-shrink-0 ${acct.connected ? 'bg-success' : 'bg-claw-600'}`} />
+          <div className="flex-1 min-w-0">
+            <div className="text-xs text-white truncate">{acct.label || acct.id}</div>
+            {acct.id !== acct.label && (
+              <div className="text-[10px] text-claw-500 truncate">{acct.id}</div>
+            )}
+          </div>
+          <div className="flex items-center gap-1 flex-shrink-0">
+            {acct.connected && (
+              <button onClick={() => handleDisconnect(acct.id)}
+                className="text-[10px] text-claw-500 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
+                title="Disconnect">
+                Disconnect
+              </button>
+            )}
+            {acct.id !== 'default' && (
+              <button onClick={() => handleRemove(acct.id)}
+                className="text-[10px] text-claw-500 hover:text-red-400 px-1.5 py-0.5 rounded transition-colors"
+                title="Remove account">
+                Remove
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+
+      {/* Disconnect All */}
+      {accounts.filter(a => a.connected).length >= 2 && (
+        <button onClick={handleDisconnectAll}
+          className="w-full py-1.5 rounded-lg text-[10px] font-medium text-claw-500 hover:text-red-400
+            bg-white/[0.02] hover:bg-red-500/5 border border-white/5 transition-all">
+          Disconnect All
+        </button>
+      )}
+    </div>
+  )
+}
+
+function AddAccountButton({ connectorName, onAdded, isEmailConnector = false, envVars = [], startExpanded = false }) {
+  const [showForm, setShowForm] = useState(startExpanded)
+  const [label, setLabel] = useState('')
+  const [envValues, setEnvValues] = useState({})
+  const [error, setError] = useState(null)
+
+  const handleAdd = async () => {
+    if (!label.trim()) {
+      setError('Name is required')
+      return
+    }
+    // For env-var connectors, require at least the first env var value
+    if (!isEmailConnector && envVars.length > 0) {
+      const firstRequired = envVars.find(v => v.required)
+      if (firstRequired && !envValues[firstRequired.key]?.trim()) {
+        setError(`${firstRequired.key} is required`)
+        return
+      }
+    }
+    setError(null)
+    const id = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    try {
+      const res = await fetch(`/api/accounts/${connectorName}/add`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, label: label.trim(), envValues }),
+      })
+      const data = await res.json()
+      if (data.error) throw new Error(data.error)
+      setLabel('')
+      setEnvValues({})
+      setShowForm(false)
+      onAdded?.()
+    } catch (e) {
+      setError(e.message)
+    }
+  }
+
+  if (!showForm) {
+    return (
+      <button onClick={() => setShowForm(true)}
+        className="w-full py-2 rounded-lg text-xs font-medium text-claw-400 hover:text-accent-light
+          bg-white/[0.02] hover:bg-accent/5 border border-dashed border-white/10 hover:border-accent/30 transition-all">
+        + Add Account
+      </button>
+    )
+  }
+
+  return (
+    <div className="space-y-2 p-3 rounded-lg border border-accent/20 bg-accent/[0.03]">
+      <div className="flex items-center gap-2">
+        <span className="text-xs font-medium text-white">Add Account</span>
+      </div>
+      <input
+        type="text"
+        placeholder={isEmailConnector ? "Name (e.g. work, personal2)" : "Name (e.g. work, staging)"}
+        value={label}
+        onChange={e => setLabel(e.target.value)}
+        className="w-full px-3 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
+          placeholder-claw-500 focus:outline-none focus:border-accent/50"
+      />
+      {/* Env var credential fields for non-email connectors */}
+      {!isEmailConnector && envVars.map(env => (
+        <div key={env.key}>
+          <label className="text-[10px] text-claw-400 mb-1 block">
+            {env.description || env.key}
+            {env.required && <span className="text-warning ml-1">*</span>}
+          </label>
+          <input
+            type="password"
+            placeholder={`Enter ${env.key}...`}
+            value={envValues[env.key] || ''}
+            onChange={e => setEnvValues(prev => ({ ...prev, [env.key]: e.target.value }))}
+            className="w-full px-3 py-1.5 rounded-lg bg-white/[0.06] border border-white/10 text-xs text-white
+              placeholder-claw-500 focus:outline-none focus:border-accent/50"
+          />
+        </div>
+      ))}
+      {error && <p className="text-[10px] text-red-400">{error}</p>}
+      <div className="flex gap-2">
+        <button onClick={handleAdd}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium bg-accent/20 text-accent-light hover:bg-accent/30 transition-all">
+          Add
+        </button>
+        <button onClick={() => { setShowForm(false); setError(null); setLabel(''); setEnvValues({}) }}
+          className="px-3 py-1.5 rounded-lg text-xs font-medium text-claw-400 hover:text-claw-200 transition-all">
+          Cancel
+        </button>
       </div>
     </div>
   )
@@ -394,16 +659,109 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
 
   useEffect(() => { fetchStatus() }, [fetchStatus])
 
-  const handleLogin = async () => {
-    setLoadingLogin(true)
-    try {
-      await fetch(`/api/${apiPath}/login`, { method: 'POST' })
+  const popupRef = useRef(null)
 
-      // Poll for login completion (gcloud opens browser itself)
+  const writePopupLoading = (popup) => {
+    try {
+      popup.document.open()
+      popup.document.write(`<html><head><title>Sign in — ${label}</title></head>
+        <body style="background:#0f0f1a;color:#fff;font-family:system-ui,-apple-system,sans-serif;
+          display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+        <div style="text-align:center">
+          <div style="font-size:18px;margin-bottom:20px;opacity:0.9">Loading Google Sign-in...</div>
+          <div style="width:32px;height:32px;border:3px solid #333;border-top-color:#4285F4;
+            border-radius:50%;animation:s 1s linear infinite;margin:0 auto"></div>
+        </div>
+        <style>@keyframes s{to{transform:rotate(360deg)}}</style>
+        </body></html>`)
+      popup.document.close()
+    } catch { /* cross-origin after navigation — expected */ }
+  }
+
+  const writePopupError = (popup, msg) => {
+    try {
+      popup.document.open()
+      popup.document.write(`<html><head><title>Error — ${label}</title></head>
+        <body style="background:#0f0f1a;color:#fff;font-family:system-ui,-apple-system,sans-serif;
+          display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+        <div style="text-align:center;max-width:360px;padding:20px">
+          <div style="font-size:18px;margin-bottom:12px;color:#f87171">Sign-in failed</div>
+          <div style="font-size:14px;opacity:0.7;margin-bottom:20px">${msg}</div>
+          <div style="font-size:13px;opacity:0.5">You can close this window.</div>
+        </div></body></html>`)
+      popup.document.close()
+    } catch { /* cross-origin — just close */ popup.close() }
+  }
+
+  const handleLogin = async (accountId = 'default') => {
+    setLoadingLogin(true)
+
+    // Open popup immediately (synchronous, in click context) to avoid popup blocker
+    // Only for personal Gmail — work email uses gcloud which opens its own browser
+    const isPersonalGmail = !isWorkEmail
+    let popup = null
+    if (isPersonalGmail) {
+      const w = 500, h = 700
+      const left = Math.round(window.screenX + (window.outerWidth - w) / 2)
+      const top = Math.round(window.screenY + (window.outerHeight - h) / 2)
+      popup = window.open('', 'gmail_auth_' + accountId, `popup,width=${w},height=${h},left=${left},top=${top}`)
+      if (popup) writePopupLoading(popup)
+      popupRef.current = popup
+    }
+
+    try {
+      const response = await fetch(`/api/${apiPath}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId }),
+      })
+      const data = await response.json()
+
+      // Navigate the already-open popup to the auth URL
+      if (data.authUrl && popup && !popup.closed) {
+        popup.location.href = data.authUrl
+      } else if (data.authUrl && (!popup || popup.closed)) {
+        // Popup was blocked or closed — try opening fresh
+        popup = window.open(data.authUrl, 'gmail_auth_' + accountId)
+        popupRef.current = popup
+      } else if (popup && !popup.closed && !data.authUrl) {
+        // No auth URL — show message in popup (don't just close it)
+        const msg = data.message || data.error || 'Could not start login. Try again.'
+        writePopupError(popup, msg)
+        if (data.status === 'already_running') {
+          // Still poll — an existing login might complete
+        } else {
+          setLoadingLogin(false)
+          return
+        }
+      }
+
+      // Poll for login completion + detect popup close
       stopPolling()
       pollRef.current = setInterval(async () => {
+        // If popup was closed before login completed, cancel the login process
+        if (popup && popup.closed) {
+          const s = await fetchStatus()
+          if (s.loggedIn || s.accounts?.some(a => a.id === accountId && a.connected)) {
+            stopPolling()
+            setLoadingLogin(false)
+            onRefresh()
+            setToast(`${label} connected!`)
+            setTimeout(() => setToast(null), 3000)
+          } else {
+            stopPolling()
+            setLoadingLogin(false)
+            fetch(`/api/${apiPath}/login/cancel`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ accountId }),
+            }).catch(() => {})
+          }
+          return
+        }
+
         const s = await fetchStatus()
-        if (s.loggedIn) {
+        if (s.loggedIn || s.accounts?.some(a => a.id === accountId && a.connected)) {
           stopPolling()
           setLoadingLogin(false)
           onRefresh()
@@ -412,13 +770,21 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
         }
       }, 2000)
       // Stop polling after 2 minutes
-      timeoutRef.current = setTimeout(() => { stopPolling(); setLoadingLogin(false) }, 120000)
-    } catch {
+      timeoutRef.current = setTimeout(() => {
+        stopPolling()
+        setLoadingLogin(false)
+        if (popup && !popup.closed) popup.close()
+      }, 120000)
+    } catch (err) {
+      if (popup && !popup.closed) writePopupError(popup, err.message || 'Network error')
       setLoadingLogin(false)
     }
   }
 
   const isConnected = status?.loggedIn
+  const accounts = status?.accounts || []
+  const hasMultipleAccounts = accounts.length > 1
+  const hasDisconnectedAccounts = accounts.some(a => !a.connected)
 
   const handleDisconnect = async () => {
     if (!confirm(`Disconnect ${label}? This will remove the token.`)) return
@@ -527,7 +893,7 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
               </div>
             ) : (
               <button
-                onClick={handleLogin}
+                onClick={() => handleLogin()}
                 disabled={loadingLogin || (!isWorkEmail && !status?.hasClientSecret)}
                 className="ml-8 flex items-center gap-3 px-5 py-2.5 rounded-xl text-sm font-medium transition-all
                   bg-white/[0.08] hover:bg-white/[0.12] border border-white/10 hover:border-white/20
@@ -536,7 +902,7 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
                 {loadingLogin ? (
                   <>
                     <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Complete login in browser...
+                    Complete login in popup...
                   </>
                 ) : (
                   <>
@@ -553,8 +919,37 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
             )}
           </div>
 
-          {/* Disconnect / Reset */}
-          {isConnected && (
+          {/* Account list (shown when multiple accounts or user clicked + Add) */}
+          {(hasMultipleAccounts || accounts.length > 0) && (
+            <div className="space-y-3 pt-2 border-t border-white/5">
+              <AccountList
+                connectorName={connectorName}
+                accounts={accounts}
+                onRefresh={() => { fetchStatus(); onRefresh() }}
+                isEmailConnector={true}
+              />
+
+              {/* Sign in button for disconnected accounts */}
+              {hasDisconnectedAccounts && accounts.filter(a => !a.connected).map(acct => (
+                <button key={acct.id}
+                  onClick={() => handleLogin(acct.id)}
+                  disabled={loadingLogin}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-xs font-medium
+                    bg-white/[0.06] hover:bg-white/[0.10] border border-white/10 text-white disabled:opacity-50 transition-all">
+                  Sign in: {acct.label || acct.id}
+                </button>
+              ))}
+
+              <AddAccountButton
+                connectorName={connectorName}
+                onAdded={() => { fetchStatus(); onRefresh() }}
+                isEmailConnector={true}
+              />
+            </div>
+          )}
+
+          {/* Disconnect / Reset (only when single default account) */}
+          {isConnected && !hasMultipleAccounts && (
             <button onClick={handleDisconnect}
               className="w-full mt-3 py-2 rounded-xl text-xs font-medium transition-all
                 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20">
@@ -812,49 +1207,68 @@ export default function App() {
 
                       {isExpanded && (
                         <div className="px-5 pb-5 space-y-3 border-t border-white/5 pt-4">
-                          {connector.envVars.length === 0 ? (
-                            <p className="text-sm text-claw-400">No configuration needed — just works! 🎉</p>
+                          {connector.supportsMultiAccount ? (
+                            /* Multi-account connectors: account-based flow */
+                            <div className="space-y-3">
+                              {(connector.accounts?.length > 0) && (
+                                <AccountList
+                                  connectorName={connector.name}
+                                  accounts={connector.accounts || []}
+                                  onRefresh={fetchAll}
+                                />
+                              )}
+                              <AddAccountButton
+                                connectorName={connector.name}
+                                onAdded={fetchAll}
+                                envVars={connector.envVars}
+                                startExpanded={!connector.connected}
+                              />
+                            </div>
+                          ) : connector.envVars.length === 0 ? (
+                            <p className="text-sm text-claw-400">No configuration needed — just works!</p>
                           ) : (
-                            connector.envVars.map(env => (
-                              <div key={env.key}>
-                                <label className="flex items-center gap-2 text-xs font-medium text-claw-300 mb-1.5">
-                                  <code className="text-accent-light bg-accent/10 px-1.5 py-0.5 rounded">{env.key}</code>
-                                  {env.required && <span className="text-warning text-[10px]">REQUIRED</span>}
-                                </label>
-                                <p className="text-xs text-claw-500 mb-2">{env.description}</p>
-                                <div className="flex gap-2">
-                                  <input
-                                    type="password"
-                                    placeholder={hasValue(env.key) ? config[env.key] : 'Enter value...'}
-                                    value={editValues[env.key] ?? ''}
-                                    onChange={e => setEditValues(prev => ({ ...prev, [env.key]: e.target.value }))}
-                                    className="flex-1 bg-claw-900/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-claw-100
-                                  placeholder:text-claw-500 focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-all"
-                                  />
-                                  <button
-                                    onClick={() => handleSave(env.key, editValues[env.key] || '')}
-                                    disabled={saving || !isEditing(env.key)}
-                                    className="px-4 py-2 rounded-lg text-sm font-medium transition-all
-                                  bg-accent/20 text-accent-light hover:bg-accent/30 
-                                  disabled:opacity-30 disabled:cursor-not-allowed"
-                                  >
-                                    Save
-                                  </button>
+                            /* Non-multi-account: raw env var inputs */
+                            <>
+                              {connector.envVars.map(env => (
+                                <div key={env.key}>
+                                  <label className="flex items-center gap-2 text-xs font-medium text-claw-300 mb-1.5">
+                                    <code className="text-accent-light bg-accent/10 px-1.5 py-0.5 rounded">{env.key}</code>
+                                    {env.required && <span className="text-warning text-[10px]">REQUIRED</span>}
+                                  </label>
+                                  <p className="text-xs text-claw-500 mb-2">{env.description}</p>
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="password"
+                                      placeholder={hasValue(env.key) ? config[env.key] : 'Enter value...'}
+                                      value={editValues[env.key] ?? ''}
+                                      onChange={e => setEditValues(prev => ({ ...prev, [env.key]: e.target.value }))}
+                                      className="flex-1 bg-claw-900/60 border border-white/10 rounded-lg px-3 py-2 text-sm text-claw-100
+                                    placeholder:text-claw-500 focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-all"
+                                    />
+                                    <button
+                                      onClick={() => handleSave(env.key, editValues[env.key] || '')}
+                                      disabled={saving || !isEditing(env.key)}
+                                      className="px-4 py-2 rounded-lg text-sm font-medium transition-all
+                                    bg-accent/20 text-accent-light hover:bg-accent/30
+                                    disabled:opacity-30 disabled:cursor-not-allowed"
+                                    >
+                                      Save
+                                    </button>
+                                  </div>
                                 </div>
-                              </div>
-                            ))
-                          )}
-
-                          {connector.envVars.length > 1 && (
-                            <button
-                              onClick={() => handleSaveAll(connector.envVars.map(v => v.key))}
-                              disabled={saving}
-                              className="w-full mt-2 py-2.5 rounded-xl text-sm font-medium transition-all
-                            bg-accent/15 text-accent-light hover:bg-accent/25 border border-accent/20
-                            disabled:opacity-30 disabled:cursor-not-allowed"
-                            >
-                              Save All
-                            </button>
+                              ))}
+                              {connector.envVars.length > 1 && (
+                                <button
+                                  onClick={() => handleSaveAll(connector.envVars.map(v => v.key))}
+                                  disabled={saving}
+                                  className="w-full mt-2 py-2.5 rounded-xl text-sm font-medium transition-all
+                                bg-accent/15 text-accent-light hover:bg-accent/25 border border-accent/20
+                                disabled:opacity-30 disabled:cursor-not-allowed"
+                                >
+                                  Save All
+                                </button>
+                              )}
+                            </>
                           )}
 
                           {/* Disconnect */}

@@ -16,6 +16,7 @@ Events emitted:
 import sys
 import os
 import json
+import copy
 import importlib.util
 from pathlib import Path
 
@@ -36,9 +37,24 @@ def emit(event):
 
 # ── Load connectors ─────────────────────────────────────────────
 
+def _read_accounts_registry():
+    """Read the accounts registry from ~/.clawfounder/accounts.json."""
+    accounts_file = Path.home() / ".clawfounder" / "accounts.json"
+    if accounts_file.exists():
+        try:
+            return json.loads(accounts_file.read_text())
+        except Exception:
+            pass
+    return {"version": 1, "accounts": {}}
+
+
 def load_all_connectors():
-    """Load all connectors that have their deps available."""
+    """Load all connectors that have their deps available.
+
+    Returns a dict of {conn_name: {"module": module, "accounts": [...], "supports_multi": bool}}.
+    """
     connectors_dir = PROJECT_ROOT / "connectors"
+    registry = _read_accounts_registry()
     loaded = {}
 
     for folder in sorted(connectors_dir.iterdir()):
@@ -54,16 +70,81 @@ def load_all_connectors():
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            if hasattr(module, "TOOLS") and hasattr(module, "handle"):
-                # Skip connectors that report themselves as not connected
+            if not (hasattr(module, "TOOLS") and hasattr(module, "handle")):
+                continue
+
+            supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
+            reg_accounts = registry.get("accounts", {}).get(folder.name, [])
+            # Filter to only enabled accounts
+            enabled_accounts = [a for a in reg_accounts if a.get("enabled", True)]
+
+            if enabled_accounts:
+                # At least one enabled account exists in the registry
+                loaded[folder.name] = {
+                    "module": module,
+                    "accounts": enabled_accounts,
+                    "supports_multi": supports_multi,
+                }
+            else:
+                # Fall back to legacy is_connected() check when no registry entry
                 if hasattr(module, "is_connected") and callable(module.is_connected):
                     if not module.is_connected():
                         continue
-                loaded[folder.name] = module
+                loaded[folder.name] = {
+                    "module": module,
+                    "accounts": [],
+                    "supports_multi": supports_multi,
+                }
         except Exception:
             pass  # Skip connectors with missing deps
 
     return loaded
+
+
+def build_tools_and_map(connectors):
+    """Build tool definitions and a routing map from loaded connectors.
+
+    When a connector has multiple enabled accounts and supports multi-account,
+    inject an `account` parameter into each tool's parameters.
+
+    Returns (all_tools, tool_map) where:
+      all_tools = list of tool definition dicts
+      tool_map = {tool_name: (conn_name, module, accounts)}
+    """
+    all_tools = []
+    tool_map = {}
+
+    for conn_name, info in connectors.items():
+        module = info["module"]
+        accounts = info["accounts"]
+        supports_multi = info["supports_multi"]
+
+        for tool in module.TOOLS:
+            if supports_multi and len(accounts) > 1:
+                # Deep copy and inject `account` parameter
+                tool_def = copy.deepcopy(tool)
+                params = tool_def.setdefault("parameters", {"type": "object", "properties": {}})
+                props = params.setdefault("properties", {})
+                required = params.setdefault("required", [])
+
+                account_ids = [a["id"] for a in accounts]
+                account_labels = {a["id"]: a.get("label", a["id"]) for a in accounts}
+                desc_parts = ", ".join(f'"{aid}" ({account_labels[aid]})' for aid in account_ids)
+                props["account"] = {
+                    "type": "string",
+                    "enum": account_ids,
+                    "description": f"Which account to use: {desc_parts}",
+                }
+                if "account" not in required:
+                    required.append("account")
+
+                all_tools.append(tool_def)
+            else:
+                all_tools.append(tool)
+
+            tool_map[tool["name"]] = (conn_name, module, accounts)
+
+    return all_tools, tool_map
 
 
 def build_system_prompt(connectors):
@@ -97,12 +178,26 @@ def build_system_prompt(connectors):
                 except Exception:
                     pass
 
+            # If this connector has multiple enabled accounts, list them
+            info = connectors[conn_name]
+            accounts = info.get("accounts", []) if isinstance(info, dict) else []
+            if len(accounts) > 1:
+                lines.append(f"#### {conn_name} — Accounts")
+                for acct in accounts:
+                    lines.append(f"- `{acct['id']}`: {acct.get('label', acct['id'])}")
+                lines.append("")
+                lines.append(
+                    f"You MUST specify the `account` parameter when calling {conn_name} tools. "
+                    "When the user doesn't specify which account, ask them."
+                )
+                lines.append("")
+
         # If both email connectors are active, add disambiguation guidance
         if "gmail" in connectors and "work_email" in connectors:
             lines.append("### Email Disambiguation")
             lines.append(
-                "The user has TWO email accounts connected. "
-                "Use `gmail_*` tools for their personal email and `work_email_*` tools for their work/company email. "
+                "The user has TWO email connector types connected: personal Gmail (`gmail_*` tools) "
+                "and work email (`work_email_*` tools). "
                 "When the user says 'my email' without specifying, ask which one. "
                 "When they say 'personal', 'Gmail', or 'personal email' → use gmail_* tools. "
                 "When they say 'work', 'work email', 'company email', or 'workspace' → use work_email_* tools."
@@ -110,6 +205,22 @@ def build_system_prompt(connectors):
             lines.append("")
 
     return "\n".join(lines)
+
+
+# ── Tool execution helper ────────────────────────────────────────
+
+def _call_tool(module, tool_name, args, accounts):
+    """Call a connector's handle() with optional account_id routing."""
+    account_id = args.pop("account", None)
+    # Auto-select if only 1 account
+    if account_id is None and len(accounts) == 1:
+        account_id = accounts[0]["id"]
+
+    supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
+    if supports_multi and account_id:
+        return module.handle(tool_name, args, account_id=account_id)
+    else:
+        return module.handle(tool_name, args)
 
 
 # ── Provider: Gemini ─────────────────────────────────────────────
@@ -133,18 +244,16 @@ def run_gemini(message, history, connectors):
         client = genai.Client(vertexai=True)
 
     # Build tool declarations from connectors
-    all_tools = []
-    tool_map = {}  # tool_name -> (connector_name, module)
-    for conn_name, module in connectors.items():
-        for tool in module.TOOLS:
-            all_tools.append(types.FunctionDeclaration(
-                name=tool["name"],
-                description=tool["description"],
-                parameters=tool.get("parameters", {}),
-            ))
-            tool_map[tool["name"]] = (conn_name, module)
+    all_tool_defs, tool_map = build_tools_and_map(connectors)
+    gemini_fns = []
+    for tool in all_tool_defs:
+        gemini_fns.append(types.FunctionDeclaration(
+            name=tool["name"],
+            description=tool["description"],
+            parameters=tool.get("parameters", {}),
+        ))
 
-    gemini_tools = types.Tool(function_declarations=all_tools) if all_tools else None
+    gemini_tools = types.Tool(function_declarations=gemini_fns) if gemini_fns else None
 
     system = build_system_prompt(connectors)
 
@@ -212,13 +321,13 @@ def run_gemini(message, history, connectors):
             fc = part.function_call
             tool_name = fc.name
             args = dict(fc.args) if fc.args else {}
-            conn_name, module = tool_map.get(tool_name, ("unknown", None))
+            conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
 
             emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
 
             if module:
                 try:
-                    result = module.handle(tool_name, args)
+                    result = _call_tool(module, tool_name, args, accounts)
                 except Exception as e:
                     result = f"Tool error: {e}"
             else:
@@ -262,19 +371,17 @@ def run_openai(message, history, connectors):
     emit({"type": "thinking", "text": "Connecting to OpenAI..."})
 
     # Build tool definitions
+    all_tool_defs, tool_map = build_tools_and_map(connectors)
     tool_defs = []
-    tool_map = {}
-    for conn_name, module in connectors.items():
-        for tool in module.TOOLS:
-            tool_defs.append({
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
-                },
-            })
-            tool_map[tool["name"]] = (conn_name, module)
+    for tool in all_tool_defs:
+        tool_defs.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool.get("parameters", {"type": "object", "properties": {}}),
+            },
+        })
 
     messages = [{"role": "system", "content": build_system_prompt(connectors)}]
     for msg in history:
@@ -310,13 +417,13 @@ def run_openai(message, history, connectors):
             for tc in msg["tool_calls"]:
                 tool_name = tc["function"]["name"]
                 args = json.loads(tc["function"]["arguments"]) if tc["function"].get("arguments") else {}
-                conn_name, module = tool_map.get(tool_name, ("unknown", None))
+                conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
 
                 emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
 
                 if module:
                     try:
-                        result = module.handle(tool_name, args)
+                        result = _call_tool(module, tool_name, args, accounts)
                     except Exception as e:
                         result = f"Tool error: {e}"
                 else:
@@ -350,16 +457,14 @@ def run_claude(message, history, connectors):
     emit({"type": "thinking", "text": "Connecting to Claude..."})
 
     # Build tool definitions
+    all_tool_defs, tool_map = build_tools_and_map(connectors)
     tool_defs = []
-    tool_map = {}
-    for conn_name, module in connectors.items():
-        for tool in module.TOOLS:
-            tool_defs.append({
-                "name": tool["name"],
-                "description": tool["description"],
-                "input_schema": tool.get("parameters", {"type": "object", "properties": {}}),
-            })
-            tool_map[tool["name"]] = (conn_name, module)
+    for tool in all_tool_defs:
+        tool_defs.append({
+            "name": tool["name"],
+            "description": tool["description"],
+            "input_schema": tool.get("parameters", {"type": "object", "properties": {}}),
+        })
 
     messages = []
     for msg in history:
@@ -406,13 +511,13 @@ def run_claude(message, history, connectors):
                 has_tool_use = True
                 tool_name = block["name"]
                 args = block.get("input", {})
-                conn_name, module = tool_map.get(tool_name, ("unknown", None))
+                conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
 
                 emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
 
                 if module:
                     try:
-                        result = module.handle(tool_name, args)
+                        result = _call_tool(module, tool_name, args, accounts)
                     except Exception as e:
                         result = f"Tool error: {e}"
                 else:
@@ -460,7 +565,8 @@ def main():
 
     # Load connectors
     connectors = load_all_connectors()
-    emit({"type": "thinking", "text": f"Loaded {len(connectors)} connector(s): {', '.join(connectors.keys())}"})
+    conn_names = list(connectors.keys())
+    emit({"type": "thinking", "text": f"Loaded {len(conn_names)} connector(s): {', '.join(conn_names)}"})
 
     # Route to provider
     providers = {

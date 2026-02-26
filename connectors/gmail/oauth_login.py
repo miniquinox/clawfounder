@@ -11,9 +11,10 @@ sensitive Gmail scopes on personal accounts.
 
 import json
 import sys
+import argparse
 from pathlib import Path
 
-_TOKEN_FILE = Path.home() / ".clawfounder" / "gmail_personal.json"
+_DEFAULT_TOKEN_FILE = Path.home() / ".clawfounder" / "gmail_personal.json"
 _CLIENT_SECRET = Path.home() / ".clawfounder" / "gmail_client_secret.json"
 
 _SCOPES = [
@@ -25,6 +26,12 @@ _SCOPES = [
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--token-file', type=str, default=None,
+                        help='Override the token file path (for non-default accounts)')
+    args = parser.parse_args()
+    _TOKEN_FILE = Path(args.token_file) if args.token_file else _DEFAULT_TOKEN_FILE
+
     if not _CLIENT_SECRET.exists():
         print(json.dumps({
             "error": "client_secret_missing",
@@ -40,11 +47,14 @@ def main():
             scopes=_SCOPES,
         )
 
-        # Run local server flow — opens browser for consent
-        # port=0 lets the OS pick a free port automatically
+        # Don't open browser — emit auth URL as JSON to stdout instead.
+        # The dashboard frontend opens it in a popup window.
+        # Double braces {{ }} produce literal braces in str.format().
         creds = flow.run_local_server(
             port=0,
             prompt="consent",
+            open_browser=False,
+            authorization_prompt_message='{{"auth_url": "{url}"}}',
             success_message="✅ Gmail connected! You can close this tab.",
         )
 
@@ -81,18 +91,6 @@ def main():
         }
         if email:
             token_data["_email"] = email
-
-        # Try to detect a quota project
-        import subprocess
-        try:
-            result = subprocess.run(
-                ["gcloud", "config", "get-value", "project"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode == 0 and result.stdout.strip():
-                token_data["quota_project_id"] = result.stdout.strip()
-        except Exception:
-            pass
 
         # Save
         _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)

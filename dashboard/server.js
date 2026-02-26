@@ -24,6 +24,9 @@ const ADC_FILE = path.join(os.homedir(), '.config', 'gcloud', 'application_defau
 const GMAIL_PERSONAL_TOKEN = path.join(os.homedir(), '.clawfounder', 'gmail_personal.json');
 const GMAIL_WORK_TOKEN = path.join(os.homedir(), '.clawfounder', 'gmail_work.json');
 
+const CLAWFOUNDER_DIR = path.join(os.homedir(), '.clawfounder');
+const ACCOUNTS_FILE = path.join(CLAWFOUNDER_DIR, 'accounts.json');
+
 const app = express();
 app.use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }));
 app.use(express.json());
@@ -80,6 +83,106 @@ function writeEnv(envObj) {
     }
 
     fs.writeFileSync(ENV_FILE, newLines.join('\n'));
+}
+
+// ── Accounts registry ───────────────────────────────────────────
+
+function readAccountsRegistry() {
+    if (!fs.existsSync(ACCOUNTS_FILE)) return { version: 1, accounts: {} };
+    try {
+        return JSON.parse(fs.readFileSync(ACCOUNTS_FILE, 'utf-8'));
+    } catch {
+        return { version: 1, accounts: {} };
+    }
+}
+
+function writeAccountsRegistry(registry) {
+    fs.mkdirSync(CLAWFOUNDER_DIR, { recursive: true });
+    fs.writeFileSync(ACCOUNTS_FILE, JSON.stringify(registry, null, 2));
+}
+
+/**
+ * Auto-generate accounts.json from existing credentials if it doesn't exist.
+ * Called at startup. No files are moved — just records what exists.
+ */
+function ensureAccountsRegistry() {
+    if (fs.existsSync(ACCOUNTS_FILE)) return;
+
+    const env = readEnv();
+    const registry = { version: 1, accounts: {} };
+
+    // Gmail personal
+    if (fs.existsSync(GMAIL_PERSONAL_TOKEN)) {
+        let email = 'Personal Gmail';
+        try {
+            const data = JSON.parse(fs.readFileSync(GMAIL_PERSONAL_TOKEN, 'utf-8'));
+            if (data._email) email = data._email;
+        } catch { /* ignore */ }
+        registry.accounts.gmail = [{
+            id: 'default',
+            label: email,
+            enabled: true,
+            credential_file: 'gmail_personal.json',
+        }];
+    }
+
+    // Work email
+    if (fs.existsSync(GMAIL_WORK_TOKEN)) {
+        let email = 'Work Email';
+        try {
+            const data = JSON.parse(fs.readFileSync(GMAIL_WORK_TOKEN, 'utf-8'));
+            if (data._email) email = data._email;
+        } catch { /* ignore */ }
+        registry.accounts.work_email = [{
+            id: 'default',
+            label: email,
+            enabled: true,
+            credential_file: 'gmail_work.json',
+        }];
+    }
+
+    // GitHub
+    if (env['GITHUB_TOKEN']) {
+        registry.accounts.github = [{
+            id: 'default',
+            label: 'personal',
+            enabled: true,
+            env_key: 'GITHUB_TOKEN',
+        }];
+    }
+
+    // Telegram
+    if (env['TELEGRAM_BOT_TOKEN'] && env['TELEGRAM_CHAT_ID']) {
+        registry.accounts.telegram = [{
+            id: 'default',
+            label: 'default bot',
+            enabled: true,
+            env_keys: { TELEGRAM_BOT_TOKEN: 'TELEGRAM_BOT_TOKEN', TELEGRAM_CHAT_ID: 'TELEGRAM_CHAT_ID' },
+        }];
+    }
+
+    // Supabase
+    if (env['SUPABASE_URL'] && env['SUPABASE_SERVICE_KEY']) {
+        registry.accounts.supabase = [{
+            id: 'default',
+            label: 'default',
+            enabled: true,
+            env_keys: { SUPABASE_URL: 'SUPABASE_URL', SUPABASE_SERVICE_KEY: 'SUPABASE_SERVICE_KEY' },
+        }];
+    }
+
+    writeAccountsRegistry(registry);
+    console.log('[accounts] Auto-generated accounts.json from existing credentials');
+}
+
+/**
+ * Get the credential file path for an email account.
+ */
+function getAccountCredentialFile(connectorName, accountId) {
+    if (accountId === 'default' || !accountId) {
+        return connectorName === 'gmail' ? GMAIL_PERSONAL_TOKEN : GMAIL_WORK_TOKEN;
+    }
+    return path.join(CLAWFOUNDER_DIR, `${connectorName}_account_${accountId}.json`);
 }
 
 // ── Discover connectors ─────────────────────────────────────────
@@ -191,11 +294,11 @@ app.get('/api/connectors', (req, res) => {
     const connectors = discoverConnectors();
     const env = readEnv();
     const firebaseAuth = getFirebaseAuth();
+    const registry = readAccountsRegistry();
 
     const enriched = connectors.map(c => {
         let connected;
         if (c.name === 'firebase') {
-            // Firebase is connected if Google login exists + project ID is set
             connected = !!(firebaseAuth?.hasToken && env['FIREBASE_PROJECT_ID']);
         } else if (c.name === 'gmail') {
             connected = fs.existsSync(GMAIL_PERSONAL_TOKEN);
@@ -206,7 +309,29 @@ app.get('/api/connectors', (req, res) => {
                 .filter(v => v.required)
                 .every(v => env[v.key] && env[v.key].length > 0);
         }
-        return { ...c, connected };
+
+        // Attach accounts from the registry
+        const accounts = (registry.accounts[c.name] || []).map(acct => {
+            let acctConnected = false;
+            if (c.name === 'gmail' || c.name === 'work_email') {
+                const credFile = getAccountCredentialFile(c.name, acct.id);
+                acctConnected = fs.existsSync(credFile);
+            } else if (acct.env_key) {
+                acctConnected = !!(env[acct.env_key]);
+            } else if (acct.env_keys) {
+                acctConnected = Object.values(acct.env_keys).every(k => env[k] && env[k].length > 0);
+            }
+            return { ...acct, connected: acctConnected };
+        });
+
+        // Also consider connected if any registry account is connected
+        if (!connected && accounts.some(a => a.connected)) {
+            connected = true;
+        }
+
+        const supportsMultiAccount = !['firebase', 'yahoo_finance'].includes(c.name);
+
+        return { ...c, connected, accounts, supportsMultiAccount };
     });
 
     res.json({ connectors: enriched });
@@ -320,7 +445,7 @@ app.post('/api/firebase/select-project', (req, res) => {
 });
 // ── Email connector routes (Gmail + Work Email) ───────────────
 
-let emailLoginProcess = null; // shared — only one login at a time
+const emailLoginProcesses = {}; // keyed by "connector:accountId" for concurrent logins
 
 const GMAIL_SCOPES = [
     'openid',
@@ -341,47 +466,83 @@ const GMAIL_CLIENT_SECRET = path.join(os.homedir(), '.clawfounder', 'gmail_clien
 for (const connName of ['gmail', 'work_email']) {
     app.get(`/api/${connName.replace('_', '-')}/status`, (req, res) => {
         const tokenFile = EMAIL_TOKEN_FILES[connName];
+        const anyLoginInProgress = Object.keys(emailLoginProcesses).some(k => k.startsWith(connName + ':'));
         try {
+            // Build per-account status from registry
+            const registry = readAccountsRegistry();
+            const acctList = registry.accounts[connName] || [];
+            const accounts = acctList.map(acct => {
+                const credFile = getAccountCredentialFile(connName, acct.id);
+                let acctLoggedIn = false;
+                let acctEmail = null;
+                try {
+                    if (fs.existsSync(credFile)) {
+                        const data = JSON.parse(fs.readFileSync(credFile, 'utf-8'));
+                        if (data.refresh_token || data.token) {
+                            acctLoggedIn = true;
+                            acctEmail = data._email || null;
+                        }
+                    }
+                } catch { /* ignore */ }
+                return {
+                    ...acct,
+                    connected: acctLoggedIn,
+                    email: acctEmail,
+                    loginInProgress: !!emailLoginProcesses[`${connName}:${acct.id}`],
+                };
+            });
+
+            // Backward-compat: top-level loggedIn/email from default account
             if (fs.existsSync(tokenFile)) {
                 const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf-8'));
                 if (tokenData.refresh_token || tokenData.token) {
                     const email = tokenData._email || null;
-                    return res.json({ loggedIn: true, email, loginInProgress: !!emailLoginProcess });
+                    const resp = { loggedIn: true, email, loginInProgress: anyLoginInProgress, accounts };
+                    if (connName === 'gmail') resp.hasClientSecret = fs.existsSync(GMAIL_CLIENT_SECRET);
+                    return res.json(resp);
                 }
             }
-            // For personal Gmail, also report if client_secret exists
-            if (connName === 'gmail') {
-                return res.json({
-                    loggedIn: false,
-                    email: null,
-                    loginInProgress: !!emailLoginProcess,
-                    hasClientSecret: fs.existsSync(GMAIL_CLIENT_SECRET),
-                });
-            }
-            res.json({ loggedIn: false, email: null, loginInProgress: !!emailLoginProcess });
+            const resp = { loggedIn: false, email: null, loginInProgress: anyLoginInProgress, accounts };
+            if (connName === 'gmail') resp.hasClientSecret = fs.existsSync(GMAIL_CLIENT_SECRET);
+            res.json(resp);
         } catch {
-            res.json({ loggedIn: false, email: null, loginInProgress: !!emailLoginProcess });
+            const resp = { loggedIn: false, email: null, loginInProgress: anyLoginInProgress, accounts: [] };
+            if (connName === 'gmail') resp.hasClientSecret = fs.existsSync(GMAIL_CLIENT_SECRET);
+            res.json(resp);
         }
     });
 }
 
 // Gmail client secret upload endpoint
+// Accepts either {client_id, client_secret} or {json: "..."} (the downloaded JSON from Google Cloud Console)
 app.post('/api/gmail/client-secret', (req, res) => {
     try {
-        const { client_id, client_secret } = req.body;
-        if (!client_id || !client_secret) {
-            return res.status(400).json({ error: 'client_id and client_secret are required.' });
-        }
+        let secretData;
 
-        const secretData = {
-            installed: {
-                client_id,
-                client_secret,
-                auth_uri: 'https://accounts.google.com/o/oauth2/auth',
-                token_uri: 'https://oauth2.googleapis.com/token',
-                redirect_uris: ['http://localhost'],
-            },
-        };
+        if ('json' in req.body) {
+            // User pasted/uploaded the full JSON from Google Cloud Console
+            const parsed = typeof req.body.json === 'string' ? JSON.parse(req.body.json) : req.body.json;
+            // Google exports as {"installed": {...}} or {"web": {...}}
+            const creds = parsed.installed || parsed.web;
+            if (!creds || !creds.client_id || !creds.client_secret) {
+                return res.status(400).json({ error: 'Invalid JSON — must contain "installed" or "web" with client_id and client_secret.' });
+            }
+            secretData = { installed: creds };
+        } else {
+            const { client_id, client_secret } = req.body;
+            if (!client_id || !client_secret) {
+                return res.status(400).json({ error: 'client_id and client_secret are required (or provide json).' });
+            }
+            secretData = {
+                installed: {
+                    client_id,
+                    client_secret,
+                    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+                    token_uri: 'https://oauth2.googleapis.com/token',
+                    redirect_uris: ['http://localhost'],
+                },
+            };
+        }
 
         fs.mkdirSync(path.dirname(GMAIL_CLIENT_SECRET), { recursive: true });
         fs.writeFileSync(GMAIL_CLIENT_SECRET, JSON.stringify(secretData, null, 2));
@@ -404,8 +565,15 @@ app.delete('/api/gmail/client-secret', (req, res) => {
 
 // ── Personal Gmail login (Python OAuth flow) ────────────────────
 app.post('/api/gmail/login', (req, res) => {
-    if (emailLoginProcess) {
-        return res.json({ status: 'already_running', message: 'Login already in progress. Complete it in your browser.' });
+    const accountId = req.body?.accountId || 'default';
+    const processKey = `gmail:${accountId}`;
+
+    if (emailLoginProcesses[processKey]) {
+        // Kill the existing process so user can retry
+        const existing = emailLoginProcesses[processKey];
+        console.log(`[${processKey}] Killing previous login process (pid ${existing.pid}) for retry.`);
+        try { existing.kill(); } catch { /* already dead */ }
+        delete emailLoginProcesses[processKey];
     }
 
     if (!fs.existsSync(GMAIL_CLIENT_SECRET)) {
@@ -415,50 +583,150 @@ app.post('/api/gmail/login', (req, res) => {
         });
     }
 
-    // Run the Python OAuth script
+    // Determine target token file for this account
+    const targetTokenFile = getAccountCredentialFile('gmail', accountId);
+
+    // Run the Python OAuth script with optional --token-file argument
     const oauthScript = path.join(CONNECTORS_DIR, 'gmail', 'oauth_login.py');
     const venvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
     const pythonCmd = fs.existsSync(venvPython) ? venvPython : 'python3';
 
-    const proc = spawn(pythonCmd, [oauthScript], {
+    const args = [oauthScript];
+    if (accountId !== 'default') {
+        args.push('--token-file', targetTokenFile);
+    }
+
+    const proc = spawn(pythonCmd, args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         cwd: PROJECT_ROOT,
+        env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
 
-    emailLoginProcess = proc;
+    emailLoginProcesses[processKey] = proc;
     let stdout = '';
     let stderr = '';
+    let responded = false;
 
-    proc.stdout.on('data', (data) => { stdout += data.toString(); });
+    // Auto-kill after 3 minutes if user never completes the login
+    const killTimer = setTimeout(() => {
+        if (emailLoginProcesses[processKey]) {
+            console.log(`[${processKey}] Login timed out after 3 minutes, killing process.`);
+            proc.kill();
+        }
+    }, 180000);
+
+    proc.stdout.on('data', (data) => {
+        stdout += data.toString();
+
+        // Try to parse the first JSON line (auth URL) before responding
+        if (!responded) {
+            const lines = stdout.split('\n');
+            for (const line of lines) {
+                if (!line.trim()) continue;
+                try {
+                    const parsed = JSON.parse(line.trim());
+                    if (parsed.auth_url) {
+                        responded = true;
+                        res.json({ status: 'started', authUrl: parsed.auth_url });
+                        return;
+                    }
+                    if (parsed.error) {
+                        responded = true;
+                        res.status(400).json({ status: 'error', ...parsed });
+                        return;
+                    }
+                } catch { /* not complete JSON yet */ }
+            }
+        }
+    });
     proc.stderr.on('data', (data) => { stderr += data.toString(); });
 
     proc.on('close', (code) => {
-        emailLoginProcess = null;
-        console.log('[gmail] OAuth login exited with code:', code);
-        if (stderr) console.log('[gmail] stderr:', stderr.slice(-300));
+        clearTimeout(killTimer);
+        delete emailLoginProcesses[processKey];
+        console.log(`[gmail:${accountId}] OAuth login exited with code:`, code);
+        if (stderr) console.log(`[gmail:${accountId}] stderr:`, stderr.slice(-300));
 
         if (code === 0) {
             try {
-                const result = JSON.parse(stdout);
-                console.log(`[gmail] ✅ Logged in as ${result.email || 'unknown'}`);
+                // Parse the LAST JSON line (success result — the first was auth_url)
+                const lines = stdout.split('\n').filter(l => l.trim());
+                const lastLine = lines[lines.length - 1];
+                const result = JSON.parse(lastLine);
+                console.log(`[gmail:${accountId}] ✅ Logged in as ${result.email || 'unknown'}`);
+                // Update or create the account entry in the registry
+                const registry = readAccountsRegistry();
+                if (!registry.accounts.gmail) registry.accounts.gmail = [];
+                const accts = registry.accounts.gmail;
+                let acct = accts.find(a => a.id === accountId);
+                if (!acct) {
+                    // First login — create the registry entry
+                    acct = {
+                        id: accountId,
+                        label: result.email || (accountId === 'default' ? 'Personal Gmail' : accountId),
+                        enabled: true,
+                        credential_file: accountId === 'default' ? 'gmail_personal.json'
+                            : `gmail_account_${accountId}.json`,
+                    };
+                    accts.push(acct);
+                } else if (result.email) {
+                    acct.label = result.email;
+                }
+                writeAccountsRegistry(registry);
             } catch {
-                console.log('[gmail] ✅ Login completed (could not parse output)');
+                console.log(`[gmail:${accountId}] ✅ Login completed (could not parse output)`);
             }
         } else {
-            console.log('[gmail] ❌ Login failed:', stdout.slice(-300));
+            console.log(`[gmail:${accountId}] ❌ Login failed:`, stdout.slice(-300));
+        }
+
+        // If we never responded (e.g. process crashed before emitting auth URL)
+        if (!responded) {
+            responded = true;
+            res.status(500).json({ status: 'error', message: 'Login process exited unexpectedly.' });
         }
     });
 
-    res.json({ status: 'started', message: 'Browser should open for Google login. Complete the login there.' });
+    // Timeout: if no auth URL within 15 seconds, respond with fallback
+    setTimeout(() => {
+        if (!responded) {
+            responded = true;
+            res.json({ status: 'started', message: 'Login process started. Complete in browser.' });
+        }
+    }, 15000);
 });
+
+// ── Cancel login (kill running OAuth/gcloud process) ─────────────
+for (const connName of ['gmail', 'work-email']) {
+    app.post(`/api/${connName}/login/cancel`, (req, res) => {
+        const accountId = req.body?.accountId || 'default';
+        const normalized = connName.replace('-', '_');
+        const processKey = `${normalized}:${accountId}`;
+        const proc = emailLoginProcesses[processKey];
+        if (proc) {
+            proc.kill();
+            delete emailLoginProcesses[processKey];
+            console.log(`[${processKey}] Login cancelled by user.`);
+            res.json({ status: 'cancelled' });
+        } else {
+            res.json({ status: 'not_running' });
+        }
+    });
+}
 
 // ── Work Email login (gcloud ADC flow) ──────────────────────────
 app.post('/api/work-email/login', (req, res) => {
-    if (emailLoginProcess) {
-        return res.json({ status: 'already_running', message: 'Login already in progress. Complete it in your browser.' });
+    const accountId = req.body?.accountId || 'default';
+    const processKey = `work_email:${accountId}`;
+
+    if (emailLoginProcesses[processKey]) {
+        const existing = emailLoginProcesses[processKey];
+        console.log(`[${processKey}] Killing previous login process (pid ${existing.pid}) for retry.`);
+        try { existing.kill(); } catch { /* already dead */ }
+        delete emailLoginProcesses[processKey];
     }
 
-    const tokenFile = EMAIL_TOKEN_FILES.work_email;
+    const tokenFile = getAccountCredentialFile('work_email', accountId);
 
     const proc = spawn('gcloud', [
         'auth', 'application-default', 'login',
@@ -468,16 +736,16 @@ app.post('/api/work-email/login', (req, res) => {
         shell: true,
     });
 
-    emailLoginProcess = proc;
+    emailLoginProcesses[processKey] = proc;
     let output = '';
 
     proc.stdout.on('data', (data) => { output += data.toString(); });
     proc.stderr.on('data', (data) => { output += data.toString(); });
 
     proc.on('close', (code) => {
-        emailLoginProcess = null;
-        console.log('[work_email] ADC login exited with code:', code);
-        if (output) console.log('[work_email] output:', output.slice(-300));
+        delete emailLoginProcesses[processKey];
+        console.log(`[work_email:${accountId}] ADC login exited with code:`, code);
+        if (output) console.log(`[work_email:${accountId}] output:`, output.slice(-300));
 
         // gcloud sometimes exits with code 1 even on success (scope warnings).
         // Check if the ADC file was actually updated recently.
@@ -489,11 +757,11 @@ app.post('/api/work-email/login', (req, res) => {
         } catch { /* file doesn't exist */ }
 
         if (code !== 0 && !adcUpdated) {
-            console.log('[work_email] Login failed (no fresh ADC file).');
+            console.log(`[work_email:${accountId}] Login failed (no fresh ADC file).`);
             return;
         }
 
-        console.log('[work_email] Login succeeded. Running post-login setup...');
+        console.log(`[work_email:${accountId}] Login succeeded. Running post-login setup...`);
 
         const run = (cmd) => {
             try {
@@ -510,9 +778,23 @@ app.post('/api/work-email/login', (req, res) => {
             adcData = JSON.parse(fs.readFileSync(ADC_FILE, 'utf-8'));
             fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
             fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
-            console.log(`[work_email] ✅ Saved initial credentials (UI should detect login now)`);
+            console.log(`[work_email:${accountId}] ✅ Saved initial credentials (UI should detect login now)`);
+
+            // Ensure account entry exists in registry so UI sees it immediately
+            const registry = readAccountsRegistry();
+            if (!registry.accounts.work_email) registry.accounts.work_email = [];
+            if (!registry.accounts.work_email.find(a => a.id === accountId)) {
+                registry.accounts.work_email.push({
+                    id: accountId,
+                    label: accountId === 'default' ? 'Work Email' : accountId,
+                    enabled: true,
+                    credential_file: accountId === 'default' ? 'gmail_work.json'
+                        : `work_email_account_${accountId}.json`,
+                });
+                writeAccountsRegistry(registry);
+            }
         } catch (e) {
-            console.log(`[work_email] ⚠ Could not save token file:`, e.message);
+            console.log(`[work_email:${accountId}] ⚠ Could not save token file:`, e.message);
             return;
         }
 
@@ -539,11 +821,11 @@ app.post('/api/work-email/login', (req, res) => {
                     const userData = await userRes.json();
                     if (userData.email) {
                         userEmail = userData.email;
-                        console.log(`[work_email] ✅ Detected email: ${userEmail}`);
+                        console.log(`[work_email:${accountId}] ✅ Detected email: ${userEmail}`);
                     }
                 }
             } catch (e) {
-                console.log('[work_email] ⚠ Could not detect email:', e.message);
+                console.log(`[work_email:${accountId}] ⚠ Could not detect email:`, e.message);
             }
 
             // 2b. Find the right quota project
@@ -558,13 +840,13 @@ app.post('/api/work-email/login', (req, res) => {
 
             // 2c. Enable Gmail API on the project
             if (quotaProject) {
-                console.log(`[work_email] Enabling Gmail API on ${quotaProject}...`);
+                console.log(`[work_email:${accountId}] Enabling Gmail API on ${quotaProject}...`);
                 run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
             }
 
             // 2d. Grant serviceUsageConsumer to the authenticated user
             if (userEmail && quotaProject) {
-                console.log(`[work_email] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
+                console.log(`[work_email:${accountId}] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
                 run(`gcloud projects add-iam-policy-binding ${quotaProject} --member="user:${userEmail}" --role="roles/serviceusage.serviceUsageConsumer" --condition=None --quiet 2>/dev/null`);
             }
 
@@ -573,12 +855,32 @@ app.post('/api/work-email/login', (req, res) => {
                 if (userEmail) adcData._email = userEmail;
                 if (quotaProject) adcData.quota_project_id = quotaProject;
                 fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
-                console.log(`[work_email] ✅ Updated token: email=${userEmail}, quota=${quotaProject}`);
+                console.log(`[work_email:${accountId}] ✅ Updated token: email=${userEmail}, quota=${quotaProject}`);
+                // Update or create the account entry in the registry
+                {
+                    const registry = readAccountsRegistry();
+                    if (!registry.accounts.work_email) registry.accounts.work_email = [];
+                    const accts = registry.accounts.work_email;
+                    let acct = accts.find(a => a.id === accountId);
+                    if (!acct) {
+                        acct = {
+                            id: accountId,
+                            label: userEmail || (accountId === 'default' ? 'Work Email' : accountId),
+                            enabled: true,
+                            credential_file: accountId === 'default' ? 'gmail_work.json'
+                                : `work_email_account_${accountId}.json`,
+                        };
+                        accts.push(acct);
+                    } else if (userEmail) {
+                        acct.label = userEmail;
+                    }
+                    writeAccountsRegistry(registry);
+                }
             } catch (e) {
-                console.log('[work_email] ⚠ Could not update token file:', e.message);
+                console.log(`[work_email:${accountId}] ⚠ Could not update token file:`, e.message);
             }
 
-            console.log('[work_email] ✅ Post-login setup complete!');
+            console.log(`[work_email:${accountId}] ✅ Post-login setup complete!`);
         })();
     });
 
@@ -589,9 +891,9 @@ app.post('/api/work-email/login', (req, res) => {
 
 app.post('/api/connector/:name/disconnect', (req, res) => {
     const { name } = req.params;
+    const accountId = req.body?.accountId;
     try {
         if (name === 'firebase') {
-            // Clear project ID from .env (keep gcloud auth intact)
             const env = readEnv();
             if (env['FIREBASE_PROJECT_ID']) {
                 writeEnv({ FIREBASE_PROJECT_ID: '' });
@@ -600,12 +902,33 @@ app.post('/api/connector/:name/disconnect', (req, res) => {
         }
 
         if (name === 'gmail' || name === 'work_email') {
+            if (accountId) {
+                // Disconnect a specific account
+                const credFile = getAccountCredentialFile(name, accountId);
+                if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+                return res.json({ success: true, message: `Account "${accountId}" disconnected.` });
+            }
+            // Legacy: disconnect default account
             const tokenFile = EMAIL_TOKEN_FILES[name];
             if (tokenFile && fs.existsSync(tokenFile)) {
                 fs.unlinkSync(tokenFile);
             }
             const label = name === 'gmail' ? 'Gmail' : 'Work Email';
             return res.json({ success: true, message: `${label} disconnected. Token removed.` });
+        }
+
+        if (accountId) {
+            // Disconnect a specific env-var account
+            const registry = readAccountsRegistry();
+            const accts = registry.accounts[name] || [];
+            const acct = accts.find(a => a.id === accountId);
+            if (acct) {
+                const envKeys = acct.env_key ? [acct.env_key] : Object.values(acct.env_keys || {});
+                const updates = {};
+                for (const k of envKeys) updates[k] = '';
+                writeEnv(updates);
+                return res.json({ success: true, message: `Account "${accountId}" disconnected.` });
+            }
         }
 
         // Generic connector: clear all env vars from .env
@@ -625,6 +948,212 @@ app.post('/api/connector/:name/disconnect', (req, res) => {
         }
         writeEnv(updates);
         return res.json({ success: true, message: `${name} disconnected. ${Object.keys(updates).length} key(s) cleared.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ── Accounts API ────────────────────────────────────────────────
+
+// Get full accounts registry
+app.get('/api/accounts', (req, res) => {
+    res.json(readAccountsRegistry());
+});
+
+// Add account to a connector
+app.post('/api/accounts/:connector/add', (req, res) => {
+    const { connector } = req.params;
+    const { id, label, envValues } = req.body;
+    if (!id || !label) {
+        return res.status(400).json({ error: 'id and label are required' });
+    }
+    if (!/^[a-z0-9_-]+$/.test(id)) {
+        return res.status(400).json({ error: 'id must be lowercase alphanumeric with hyphens/underscores' });
+    }
+    try {
+        const registry = readAccountsRegistry();
+        if (!registry.accounts[connector]) registry.accounts[connector] = [];
+        if (registry.accounts[connector].find(a => a.id === id)) {
+            return res.status(409).json({ error: `Account "${id}" already exists for ${connector}` });
+        }
+
+        const entry = { id, label, enabled: true };
+
+        // Determine credential storage based on connector type
+        if (connector === 'gmail' || connector === 'work_email') {
+            entry.credential_file = `${connector}_account_${id}.json`;
+        } else {
+            // For env-var connectors, derive env key names from the connector's existing pattern
+            const connectors = discoverConnectors();
+            const connDef = connectors.find(c => c.name === connector);
+            if (connDef && connDef.envVars.length === 1) {
+                const derivedKey = `${connDef.envVars[0].key}_${id.toUpperCase().replace(/-/g, '_')}`;
+                entry.env_key = derivedKey;
+                // Save the actual credential value to .env if provided
+                if (envValues && envValues[connDef.envVars[0].key]) {
+                    writeEnv({ [derivedKey]: envValues[connDef.envVars[0].key] });
+                }
+            } else if (connDef && connDef.envVars.length > 1) {
+                const keys = {};
+                const envUpdates = {};
+                for (const v of connDef.envVars) {
+                    const derivedKey = `${v.key}_${id.toUpperCase().replace(/-/g, '_')}`;
+                    keys[v.key] = derivedKey;
+                    // Save the actual credential value to .env if provided
+                    if (envValues && envValues[v.key]) {
+                        envUpdates[derivedKey] = envValues[v.key];
+                    }
+                }
+                entry.env_keys = keys;
+                if (Object.keys(envUpdates).length > 0) {
+                    writeEnv(envUpdates);
+                }
+            }
+        }
+
+        registry.accounts[connector].push(entry);
+        writeAccountsRegistry(registry);
+        res.json({ success: true, account: entry });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Toggle account enable/disable
+app.post('/api/accounts/:connector/:id/toggle', (req, res) => {
+    const { connector, id } = req.params;
+    const { enabled } = req.body;
+    try {
+        const registry = readAccountsRegistry();
+        const accts = registry.accounts[connector] || [];
+        const acct = accts.find(a => a.id === id);
+        if (!acct) return res.status(404).json({ error: 'Account not found' });
+        acct.enabled = !!enabled;
+        writeAccountsRegistry(registry);
+        res.json({ success: true, account: acct });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Remove account entirely
+app.post('/api/accounts/:connector/:id/remove', (req, res) => {
+    const { connector, id } = req.params;
+    if (id === 'default') {
+        return res.status(400).json({ error: 'Cannot remove the default account. Use disconnect instead.' });
+    }
+    try {
+        const registry = readAccountsRegistry();
+        const accts = registry.accounts[connector] || [];
+        const idx = accts.findIndex(a => a.id === id);
+        if (idx === -1) return res.status(404).json({ error: 'Account not found' });
+
+        const acct = accts[idx];
+        // Delete credential file if it exists
+        if (acct.credential_file) {
+            const credFile = path.join(CLAWFOUNDER_DIR, acct.credential_file);
+            if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+        }
+        // Clear env vars if applicable
+        if (acct.env_key) {
+            writeEnv({ [acct.env_key]: '' });
+        } else if (acct.env_keys) {
+            const updates = {};
+            for (const k of Object.values(acct.env_keys)) updates[k] = '';
+            writeEnv(updates);
+        }
+
+        accts.splice(idx, 1);
+        writeAccountsRegistry(registry);
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Rename account
+app.post('/api/accounts/:connector/:id/rename', (req, res) => {
+    const { connector, id } = req.params;
+    const { label } = req.body;
+    if (!label) return res.status(400).json({ error: 'label is required' });
+    try {
+        const registry = readAccountsRegistry();
+        const accts = registry.accounts[connector] || [];
+        const acct = accts.find(a => a.id === id);
+        if (!acct) return res.status(404).json({ error: 'Account not found' });
+        acct.label = label;
+        writeAccountsRegistry(registry);
+        res.json({ success: true, account: acct });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Disconnect one account (clear creds, keep entry)
+app.post('/api/accounts/:connector/:id/disconnect', (req, res) => {
+    const { connector, id } = req.params;
+    try {
+        const registry = readAccountsRegistry();
+        const accts = registry.accounts[connector] || [];
+        const acct = accts.find(a => a.id === id);
+        if (!acct) return res.status(404).json({ error: 'Account not found' });
+
+        if (acct.credential_file) {
+            const credFile = path.join(CLAWFOUNDER_DIR, acct.credential_file);
+            if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+        } else if (connector === 'gmail' || connector === 'work_email') {
+            const credFile = getAccountCredentialFile(connector, id);
+            if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+        } else if (acct.env_key) {
+            writeEnv({ [acct.env_key]: '' });
+        } else if (acct.env_keys) {
+            const updates = {};
+            for (const k of Object.values(acct.env_keys)) updates[k] = '';
+            writeEnv(updates);
+        }
+        res.json({ success: true, message: `Account "${id}" disconnected.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Disconnect ALL accounts for a connector
+app.post('/api/accounts/:connector/disconnect-all', (req, res) => {
+    const { connector } = req.params;
+    try {
+        const registry = readAccountsRegistry();
+        const accts = registry.accounts[connector] || [];
+        for (const acct of accts) {
+            if (acct.credential_file) {
+                const credFile = path.join(CLAWFOUNDER_DIR, acct.credential_file);
+                if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+            } else if (connector === 'gmail' || connector === 'work_email') {
+                const credFile = getAccountCredentialFile(connector, acct.id);
+                if (fs.existsSync(credFile)) fs.unlinkSync(credFile);
+            } else if (acct.env_key) {
+                writeEnv({ [acct.env_key]: '' });
+            } else if (acct.env_keys) {
+                const updates = {};
+                for (const k of Object.values(acct.env_keys)) updates[k] = '';
+                writeEnv(updates);
+            }
+        }
+        res.json({ success: true, message: `All ${connector} accounts disconnected.` });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// Toggle all accounts for a connector
+app.post('/api/accounts/:connector/toggle-all', (req, res) => {
+    const { connector } = req.params;
+    const { enabled } = req.body;
+    try {
+        const registry = readAccountsRegistry();
+        const accts = registry.accounts[connector] || [];
+        for (const acct of accts) acct.enabled = !!enabled;
+        writeAccountsRegistry(registry);
+        res.json({ success: true });
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
@@ -725,5 +1254,6 @@ app.post('/api/chat', (req, res) => {
 // ── Start ───────────────────────────────────────────────────────
 const PORT = 3001;
 app.listen(PORT, () => {
+    ensureAccountsRegistry();
     console.log(`🦀 ClawFounder API running on http://localhost:${PORT}`);
 });
