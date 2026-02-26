@@ -11,7 +11,7 @@ import fs from 'fs';
 import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -391,6 +391,17 @@ app.post('/api/gmail/client-secret', (req, res) => {
     }
 });
 
+// Delete Gmail client secret (reset OAuth credentials)
+app.delete('/api/gmail/client-secret', (req, res) => {
+    try {
+        if (fs.existsSync(GMAIL_CLIENT_SECRET)) fs.unlinkSync(GMAIL_CLIENT_SECRET);
+        if (fs.existsSync(GMAIL_PERSONAL_TOKEN)) fs.unlinkSync(GMAIL_PERSONAL_TOKEN);
+        res.json({ success: true, message: 'Gmail credentials reset.' });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
 // ── Personal Gmail login (Python OAuth flow) ────────────────────
 app.post('/api/gmail/login', (req, res) => {
     if (emailLoginProcess) {
@@ -466,15 +477,24 @@ app.post('/api/work-email/login', (req, res) => {
     proc.on('close', (code) => {
         emailLoginProcess = null;
         console.log('[work_email] ADC login exited with code:', code);
+        if (output) console.log('[work_email] output:', output.slice(-300));
 
-        if (code !== 0) {
-            console.log('[work_email] Login failed:', output.slice(-200));
+        // gcloud sometimes exits with code 1 even on success (scope warnings).
+        // Check if the ADC file was actually updated recently.
+        let adcUpdated = false;
+        try {
+            const stat = fs.statSync(ADC_FILE);
+            const ageMs = Date.now() - stat.mtimeMs;
+            adcUpdated = ageMs < 60000; // updated within last 60 seconds
+        } catch { /* file doesn't exist */ }
+
+        if (code !== 0 && !adcUpdated) {
+            console.log('[work_email] Login failed (no fresh ADC file).');
             return;
         }
 
         console.log('[work_email] Login succeeded. Running post-login setup...');
 
-        const { execSync } = require('child_process');
         const run = (cmd) => {
             try {
                 return execSync(cmd, { encoding: 'utf-8', timeout: 30000 }).trim();
@@ -484,45 +504,65 @@ app.post('/api/work-email/login', (req, res) => {
             }
         };
 
-        // 1. Detect quota project
+        // 1. Detect quota project (fast — just reads config/env)
         let quotaProject = null;
         const env = readEnv();
         if (env['FIREBASE_PROJECT_ID']) quotaProject = env['FIREBASE_PROJECT_ID'];
         if (!quotaProject) quotaProject = run('gcloud config get-value project 2>/dev/null');
+
+        // 2. Read ADC file and save token IMMEDIATELY (so UI detects login)
+        let adcData;
+        try {
+            adcData = JSON.parse(fs.readFileSync(ADC_FILE, 'utf-8'));
+            if (quotaProject) adcData.quota_project_id = quotaProject;
+            fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
+            fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
+            console.log(`[work_email] ✅ Saved initial credentials to ${tokenFile}`);
+        } catch (e) {
+            console.log(`[work_email] ⚠ Could not save token file:`, e.message);
+            return;
+        }
+
+        // 3. Detect email from the ADC token (NOT gcloud auth list, which returns wrong account)
+        //    Use the refresh token to get an access token, then call userinfo
+        (async () => {
+            try {
+                const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: new URLSearchParams({
+                        client_id: adcData.client_id,
+                        client_secret: adcData.client_secret,
+                        refresh_token: adcData.refresh_token,
+                        grant_type: 'refresh_token',
+                    }),
+                });
+                const tokenData = await tokenRes.json();
+
+                if (tokenData.access_token) {
+                    const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+                        headers: { Authorization: `Bearer ${tokenData.access_token}` },
+                    });
+                    const userData = await userRes.json();
+                    if (userData.email) {
+                        adcData._email = userData.email;
+                        fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
+                        console.log(`[work_email] ✅ Detected email: ${userData.email}`);
+                    }
+                }
+            } catch (e) {
+                console.log('[work_email] ⚠ Could not detect email:', e.message);
+            }
+        })();
+
+        // 4. Slow setup (runs after token is saved — UI already shows connected)
         if (!quotaProject) {
             const first = run('gcloud projects list --format="value(projectId)" --limit=1 2>/dev/null');
             if (first) quotaProject = first;
         }
-
-        // 2. Enable Gmail API
         if (quotaProject) {
             console.log(`[work_email] Enabling Gmail API on ${quotaProject}...`);
             run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
-        }
-
-        // 3. Detect email
-        let userEmail = null;
-        try {
-            const accounts = run('gcloud auth list --filter="status:ACTIVE" --format="value(account)" 2>/dev/null');
-            if (accounts) userEmail = accounts.split('\n')[0].trim();
-        } catch { /* best effort */ }
-
-        // 4. Grant serviceUsageConsumer
-        if (userEmail && quotaProject) {
-            console.log(`[work_email] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
-            run(`gcloud projects add-iam-policy-binding ${quotaProject} --member="user:${userEmail}" --role="roles/serviceusage.serviceUsageConsumer" --condition=None --quiet 2>/dev/null`);
-        }
-
-        // 5. Copy ADC → token file
-        try {
-            const adcData = JSON.parse(fs.readFileSync(ADC_FILE, 'utf-8'));
-            if (quotaProject) adcData.quota_project_id = quotaProject;
-            if (userEmail) adcData._email = userEmail;
-            fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
-            fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
-            console.log(`[work_email] ✅ Saved credentials to ${tokenFile}`);
-        } catch (e) {
-            console.log(`[work_email] ⚠ Could not save token file:`, e.message);
         }
 
         console.log('[work_email] ✅ Post-login setup complete!');

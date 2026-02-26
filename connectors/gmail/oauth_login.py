@@ -41,16 +41,34 @@ def main():
         )
 
         # Run local server flow — opens browser for consent
+        # port=0 lets the OS pick a free port automatically
         creds = flow.run_local_server(
-            port=8089,
+            port=0,
             prompt="consent",
             success_message="✅ Gmail connected! You can close this tab.",
         )
 
-        # Detect the user's email from the id_token
+        # Detect the user's email
         email = None
-        if hasattr(creds, "id_token") and creds.id_token:
-            email = creds.id_token.get("email")
+
+        # Try id_token (may be a dict or a JWT string depending on library version)
+        id_token = getattr(creds, "id_token", None)
+        if isinstance(id_token, dict):
+            email = id_token.get("email")
+
+        # Fallback: call userinfo API with the access token
+        if not email and creds.token:
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    "https://www.googleapis.com/oauth2/v2/userinfo",
+                    headers={"Authorization": f"Bearer {creds.token}"},
+                )
+                resp = urllib.request.urlopen(req, timeout=5)
+                user_data = json.loads(resp.read())
+                email = user_data.get("email")
+            except Exception:
+                pass
 
         # Build token data to save
         token_data = {

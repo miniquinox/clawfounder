@@ -553,12 +553,23 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
             )}
           </div>
 
-          {/* Disconnect */}
+          {/* Disconnect / Reset */}
           {isConnected && (
             <button onClick={handleDisconnect}
               className="w-full mt-3 py-2 rounded-xl text-xs font-medium transition-all
                 bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20">
               Disconnect {label}
+            </button>
+          )}
+          {!isWorkEmail && !isConnected && status?.hasClientSecret && (
+            <button onClick={async () => {
+              if (!confirm('Reset OAuth credentials? You will need to re-enter your Client ID and Secret.')) return
+              await fetch('/api/gmail/client-secret', { method: 'DELETE' })
+              fetchStatus()
+            }}
+              className="w-full mt-2 py-2 rounded-xl text-[11px] font-medium transition-all
+                bg-white/[0.04] text-claw-400 hover:bg-white/[0.08] border border-white/5 hover:text-claw-300">
+              ↺ Reset OAuth credentials
             </button>
           )}
         </div>
