@@ -103,6 +103,113 @@ TOOLS = [
             "required": ["to", "subject", "body"],
         },
     },
+    {
+        "name": "work_email_reply",
+        "description": (
+            "Reply to an existing work email thread. Use after work_email_read_email to reply to a specific message. "
+            "Maintains the thread so the reply appears in the same conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The message ID to reply to",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Reply body (plain text)",
+                },
+            },
+            "required": ["message_id", "body"],
+        },
+    },
+    {
+        "name": "work_email_create_draft",
+        "description": "Create a draft email in your work email. The draft is saved but NOT sent.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "Email subject",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Email body (plain text)",
+                },
+            },
+            "required": ["to", "subject", "body"],
+        },
+    },
+    {
+        "name": "work_email_trash",
+        "description": "Move a work email to the trash. Use the message ID from work_email_search or work_email_get_unread.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The message ID to trash",
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "work_email_mark_read",
+        "description": "Mark one or more work emails as read. Accepts a single message ID or a comma-separated list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "string",
+                    "description": "Message ID(s) to mark as read (comma-separated for multiple)",
+                },
+            },
+            "required": ["message_ids"],
+        },
+    },
+    {
+        "name": "work_email_mark_unread",
+        "description": "Mark one or more work emails as unread. Accepts a single message ID or a comma-separated list.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_ids": {
+                    "type": "string",
+                    "description": "Message ID(s) to mark as unread (comma-separated for multiple)",
+                },
+            },
+            "required": ["message_ids"],
+        },
+    },
+    {
+        "name": "work_email_toggle_star",
+        "description": "Star or unstar a work email.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The message ID to star/unstar",
+                },
+            },
+            "required": ["message_id"],
+        },
+    },
+    {
+        "name": "work_email_list_labels",
+        "description": "List all labels (folders/categories) in the work email. Returns label names and IDs.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -271,6 +378,91 @@ def _send(to: str, subject: str, body: str) -> str:
     return f"Work email sent to {to} with subject: {subject}"
 
 
+def _reply(message_id: str, body: str) -> str:
+    service = _get_gmail_service()
+    original = service.users().messages().get(
+        userId="me", id=message_id, format="metadata"
+    ).execute()
+    headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
+    thread_id = original.get("threadId")
+
+    reply_msg = MIMEText(body)
+    reply_msg["to"] = headers.get("From", headers.get("Reply-To", ""))
+    reply_msg["subject"] = "Re: " + headers.get("Subject", "").removeprefix("Re: ")
+    reply_msg["In-Reply-To"] = headers.get("Message-ID", "")
+    reply_msg["References"] = headers.get("Message-ID", "")
+
+    raw = base64.urlsafe_b64encode(reply_msg.as_bytes()).decode()
+    send_body = {"raw": raw}
+    if thread_id:
+        send_body["threadId"] = thread_id
+
+    service.users().messages().send(userId="me", body=send_body).execute()
+    return f"Reply sent to {reply_msg['to']} in thread: {headers.get('Subject', '')}"
+
+
+def _create_draft(to: str, subject: str, body: str) -> str:
+    service = _get_gmail_service()
+    message = MIMEText(body)
+    message["to"] = to
+    message["subject"] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    draft = service.users().drafts().create(
+        userId="me", body={"message": {"raw": raw}}
+    ).execute()
+    return f"Draft created (ID: {draft['id']}) to {to} with subject: {subject}"
+
+
+def _trash(message_id: str) -> str:
+    service = _get_gmail_service()
+    service.users().messages().trash(userId="me", id=message_id).execute()
+    return f"Email {message_id} moved to trash."
+
+
+def _modify_labels(message_ids: str, add_labels: list = None, remove_labels: list = None) -> str:
+    service = _get_gmail_service()
+    ids = [mid.strip() for mid in message_ids.split(",")]
+    body = {}
+    if add_labels:
+        body["addLabelIds"] = add_labels
+    if remove_labels:
+        body["removeLabelIds"] = remove_labels
+    for mid in ids:
+        service.users().messages().modify(userId="me", id=mid, body=body).execute()
+    count = len(ids)
+    return f"Updated {count} email(s)."
+
+
+def _toggle_star(message_id: str) -> str:
+    service = _get_gmail_service()
+    msg = service.users().messages().get(userId="me", id=message_id, format="minimal").execute()
+    labels = msg.get("labelIds", [])
+    if "STARRED" in labels:
+        service.users().messages().modify(
+            userId="me", id=message_id, body={"removeLabelIds": ["STARRED"]}
+        ).execute()
+        return f"Email {message_id} unstarred."
+    else:
+        service.users().messages().modify(
+            userId="me", id=message_id, body={"addLabelIds": ["STARRED"]}
+        ).execute()
+        return f"Email {message_id} starred."
+
+
+def _list_labels() -> str:
+    service = _get_gmail_service()
+    results = service.users().labels().list(userId="me").execute()
+    labels = results.get("labels", [])
+    output = []
+    for label in sorted(labels, key=lambda l: l.get("name", "")):
+        output.append({
+            "id": label["id"],
+            "name": label.get("name", label["id"]),
+            "type": label.get("type", "user"),
+        })
+    return json.dumps(output, indent=2)
+
+
 # ─── Handler ───────────────────────────────────────────────────
 
 def handle(tool_name: str, args: dict) -> str:
@@ -283,6 +475,20 @@ def handle(tool_name: str, args: dict) -> str:
             return _read_email(args["message_id"])
         elif tool_name == "work_email_send":
             return _send(args["to"], args["subject"], args["body"])
+        elif tool_name == "work_email_reply":
+            return _reply(args["message_id"], args["body"])
+        elif tool_name == "work_email_create_draft":
+            return _create_draft(args["to"], args["subject"], args["body"])
+        elif tool_name == "work_email_trash":
+            return _trash(args["message_id"])
+        elif tool_name == "work_email_mark_read":
+            return _modify_labels(args["message_ids"], remove_labels=["UNREAD"])
+        elif tool_name == "work_email_mark_unread":
+            return _modify_labels(args["message_ids"], add_labels=["UNREAD"])
+        elif tool_name == "work_email_toggle_star":
+            return _toggle_star(args["message_id"])
+        elif tool_name == "work_email_list_labels":
+            return _list_labels()
         else:
             return f"Unknown tool: {tool_name}"
     except Exception as e:
