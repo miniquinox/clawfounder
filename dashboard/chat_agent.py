@@ -66,6 +66,55 @@ def load_all_connectors():
     return loaded
 
 
+def build_system_prompt(connectors):
+    """Build a rich system prompt from the loaded connectors."""
+    lines = [
+        "You are ClawFounder 🦀 — a personal AI agent that takes real actions "
+        "using connected services. Be concise and helpful.",
+        "",
+        "## Rules",
+        "1. ALWAYS use tools to answer questions — never guess or say you can't when a tool exists.",
+        "2. When the user asks about emails, files, data, etc. — call the appropriate tool FIRST, then answer.",
+        "3. If a tool returns an error, report it honestly and suggest next steps.",
+        "4. Explain what tool you're calling and why, briefly.",
+        "",
+    ]
+
+    # Build connector reference
+    if connectors:
+        lines.append("## Connected Services & Tools")
+        for conn_name, module in sorted(connectors.items()):
+            tool_names = [t["name"] for t in module.TOOLS]
+            desc = module.__doc__.strip().split("\n")[0] if module.__doc__ else conn_name
+            lines.append(f"- **{conn_name}**: {desc}")
+            for tool in module.TOOLS:
+                lines.append(f"  - `{tool['name']}`: {tool['description'][:120]}")
+        lines.append("")
+
+    # Special guidance for email connectors
+    has_gmail = "gmail" in connectors
+    has_work = "work_email" in connectors
+    if has_gmail or has_work:
+        lines.append("## Email Guidance")
+        if has_gmail and has_work:
+            lines.append(
+                "The user has TWO email accounts. Use `gmail_*` tools for their personal "
+                "email and `work_email_*` tools for their work/company email. "
+                "When the user says 'my email' without specifying, ask which one. "
+                "When they say 'personal', 'Gmail', or 'personal email' → use gmail_* tools. "
+                "When they say 'work', 'work email', 'company email', or 'workspace' → use work_email_* tools."
+            )
+        lines.append(
+            "To find drafts use search with query 'in:drafts'. "
+            "To find sent emails use 'in:sent'. "
+            "To find starred emails use 'is:starred'. "
+            "Always use the search tool for these — don't say you can't do it."
+        )
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ── Provider: Gemini ─────────────────────────────────────────────
 
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
@@ -100,11 +149,7 @@ def run_gemini(message, history, connectors):
 
     gemini_tools = types.Tool(function_declarations=all_tools) if all_tools else None
 
-    system = (
-        "You are ClawFounder 🦀 — a personal AI agent that can take real actions "
-        "using connected services. Use the available tools to help the user. "
-        "Be concise and helpful. When you use tools, explain what you're doing."
-    )
+    system = build_system_prompt(connectors)
 
     # Build conversation history
     contents = []
@@ -234,7 +279,7 @@ def run_openai(message, history, connectors):
             })
             tool_map[tool["name"]] = (conn_name, module)
 
-    messages = [{"role": "system", "content": "You are ClawFounder 🦀 — a personal AI agent. Be concise and helpful."}]
+    messages = [{"role": "system", "content": build_system_prompt(connectors)}]
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["text"]})
     messages.append({"role": "user", "content": message})
@@ -335,7 +380,7 @@ def run_claude(message, history, connectors):
         body = {
             "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             "max_tokens": 4096,
-            "system": "You are ClawFounder 🦀 — a personal AI agent. Be concise and helpful.",
+            "system": build_system_prompt(connectors),
             "messages": messages,
         }
         if tool_defs:
