@@ -1,4 +1,12 @@
-# ClawFounder — Core dependencies
+# ClawFounder — All dependencies
 python-dotenv>=1.0.0
 requests>=2.31.0
 google-genai>=1.50.0
+
+# Connectors
+PyGithub>=2.3.0                    # github
+google-api-python-client>=2.100.0  # gmail, work_email
+google-auth>=2.23.0                # gmail, work_email
+google-auth-httplib2>=0.2.0        # gmail, work_email
+supabase>=2.5.0                    # supabase
+yfinance>=0.2.30                   # yahoo_finance

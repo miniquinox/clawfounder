@@ -9,6 +9,79 @@ const CONNECTOR_META = {
   supabase: { emoji: '⚡', label: 'Supabase', color: '#3ecf8e' },
   firebase: { emoji: '🔥', label: 'Firebase', color: '#ffca28' },
   yahoo_finance: { emoji: '📈', label: 'Yahoo Finance', color: '#7b61ff' },
+  whatsapp: { emoji: '💬', label: 'WhatsApp', color: '#25d366' },
+}
+
+const CONNECTOR_SETUP = {
+  telegram: {
+    title: 'Set up a Telegram Bot',
+    time: '~1 min',
+    steps: [
+      { text: 'Open Telegram and message', link: { label: '@BotFather', url: 'https://t.me/BotFather' } },
+      { text: 'Send /newbot and follow the prompts \u2014 copy the Bot Token' },
+      { text: 'Message', link: { label: '@userinfobot', url: 'https://t.me/userinfobot' }, suffix: 'to get your Chat ID' },
+      { text: 'Start a conversation with your bot (search for it and click "Start")' },
+    ],
+    tip: 'Bots can only message users who have started a conversation with them first.',
+  },
+  github: {
+    title: 'Create a GitHub Personal Access Token',
+    time: '~1 min',
+    steps: [
+      { text: 'Go to', link: { label: 'GitHub \u2192 Developer settings \u2192 Tokens (classic)', url: 'https://github.com/settings/tokens' } },
+      { text: 'Click Generate new token (classic) \u2014 name it (e.g. "ClawFounder")' },
+      { text: 'Select scopes: repo (required), notifications, workflow (optional)' },
+      { text: 'Click Generate token and copy it immediately' },
+    ],
+    tip: 'The token is only shown once. If you lose it, generate a new one.',
+  },
+  whatsapp: {
+    title: 'Set up WhatsApp Cloud API',
+    time: '~10 min',
+    steps: [
+      { text: 'Go to', link: { label: 'Meta for Developers', url: 'https://developers.facebook.com/' }, suffix: '\u2192 Create App \u2192 Business type' },
+      { text: 'Add the WhatsApp product \u2192 go to API Setup page' },
+      { text: 'Copy your Phone Number ID (under "From")' },
+      { text: 'For a permanent token: Business Settings \u2192', link: { label: 'System Users', url: 'https://business.facebook.com/settings/system-users' }, suffix: '\u2192 Add \u2192 Generate Token with whatsapp_business_messaging permission' },
+      { text: 'Add test recipient numbers under API Setup \u2192 "To" \u2192 Manage phone number list' },
+    ],
+    tip: 'The test token on API Setup expires in 24h. Use a System User token for permanent access.',
+  },
+  supabase: {
+    title: 'Get your Supabase project credentials',
+    time: '~1 min',
+    steps: [
+      { text: 'Go to', link: { label: 'supabase.com/dashboard', url: 'https://supabase.com/dashboard' }, suffix: 'and open your project' },
+      { text: 'Go to Project Settings \u2192 API' },
+      { text: 'Copy the Project URL (starts with https://...supabase.co)' },
+      { text: 'Copy the service_role key (under "Project API keys" \u2014 not the anon key)' },
+    ],
+    tip: 'Use the service_role key, not the anon key. The service_role key bypasses Row Level Security.',
+  },
+}
+
+function ConnectorSetupGuide({ connectorName }) {
+  const setup = CONNECTOR_SETUP[connectorName]
+  if (!setup) return null
+
+  return (
+    <div className="bg-blue-500/10 border border-blue-500/20 rounded-xl px-4 py-3 text-xs text-blue-300 space-y-1.5">
+      <div className="font-semibold text-blue-200">{setup.title} ({setup.time})</div>
+      <ol className="list-decimal ml-4 space-y-1">
+        {setup.steps.map((step, i) => (
+          <li key={i}>
+            {step.link ? (
+              <>{step.text}{' '}<a href={step.link.url} target="_blank" rel="noopener"
+                className="underline hover:text-blue-100">{step.link.label}</a>{step.suffix ? ` ${step.suffix}` : ''}</>
+            ) : step.text}
+          </li>
+        ))}
+      </ol>
+      {setup.tip && (
+        <div className="text-[10px] text-blue-400 mt-1.5 italic">{setup.tip}</div>
+      )}
+    </div>
+  )
 }
 
 const PROVIDER_KEYS = [
@@ -1207,6 +1280,7 @@ export default function App() {
 
                       {isExpanded && (
                         <div className="px-5 pb-5 space-y-3 border-t border-white/5 pt-4">
+                          <ConnectorSetupGuide connectorName={connector.name} />
                           {connector.supportsMultiAccount ? (
                             /* Multi-account connectors: account-based flow */
                             <div className="space-y-3">
