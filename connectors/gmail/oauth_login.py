@@ -67,7 +67,8 @@ def main():
             email = id_token.get("email")
 
         # Fallback: call userinfo API with the access token
-        if not email and creds.token:
+        user_name = None
+        if creds.token:
             try:
                 import urllib.request
                 req = urllib.request.Request(
@@ -76,7 +77,9 @@ def main():
                 )
                 resp = urllib.request.urlopen(req, timeout=5)
                 user_data = json.loads(resp.read())
-                email = user_data.get("email")
+                if not email:
+                    email = user_data.get("email")
+                user_name = user_data.get("name")
             except Exception:
                 pass
 
@@ -91,6 +94,8 @@ def main():
         }
         if email:
             token_data["_email"] = email
+        if user_name:
+            token_data["_name"] = user_name
 
         # Save
         _TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -99,6 +104,7 @@ def main():
         print(json.dumps({
             "success": True,
             "email": email,
+            "name": user_name,
             "token_file": str(_TOKEN_FILE),
         }))
 

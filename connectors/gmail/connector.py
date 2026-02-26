@@ -296,6 +296,7 @@ def _get_unread(max_results: int = 10, account_id=None) -> str:
         output.append({
             "id": msg_ref["id"],
             "from": headers.get("From", "Unknown"),
+            "to": headers.get("To", "Unknown"),
             "subject": headers.get("Subject", "(no subject)"),
             "date": headers.get("Date", "Unknown"),
             "snippet": msg.get("snippet", ""),
@@ -323,6 +324,7 @@ def _search(query: str, max_results: int = 5, account_id=None) -> str:
         output.append({
             "id": msg_ref["id"],
             "from": headers.get("From", "Unknown"),
+            "to": headers.get("To", "Unknown"),
             "subject": headers.get("Subject", "(no subject)"),
             "date": headers.get("Date", "Unknown"),
             "snippet": msg.get("snippet", ""),
