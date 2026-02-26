@@ -504,29 +504,22 @@ app.post('/api/work-email/login', (req, res) => {
             }
         };
 
-        // 1. Detect quota project — prefer gcloud config project (where Gmail API is enabled)
-        let quotaProject = run('gcloud config get-value project 2>/dev/null');
-        if (!quotaProject) {
-            const env = readEnv();
-            if (env['FIREBASE_PROJECT_ID']) quotaProject = env['FIREBASE_PROJECT_ID'];
-        }
-
-        // 2. Read ADC file and save token IMMEDIATELY (so UI detects login)
+        // 1. Read ADC file and save immediately (so UI detects login fast)
         let adcData;
         try {
             adcData = JSON.parse(fs.readFileSync(ADC_FILE, 'utf-8'));
-            if (quotaProject) adcData.quota_project_id = quotaProject;
             fs.mkdirSync(path.dirname(tokenFile), { recursive: true });
             fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
-            console.log(`[work_email] ✅ Saved initial credentials to ${tokenFile}`);
+            console.log(`[work_email] ✅ Saved initial credentials (UI should detect login now)`);
         } catch (e) {
             console.log(`[work_email] ⚠ Could not save token file:`, e.message);
             return;
         }
 
-        // 3. Detect email from the ADC token (NOT gcloud auth list, which returns wrong account)
-        //    Use the refresh token to get an access token, then call userinfo
+        // 2. Async: detect email + setup project (UI already shows "Connected")
         (async () => {
+            // 2a. Detect email from the actual ADC token via userinfo API
+            let userEmail = null;
             try {
                 const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
                     method: 'POST',
@@ -539,34 +532,54 @@ app.post('/api/work-email/login', (req, res) => {
                     }),
                 });
                 const tokenData = await tokenRes.json();
-
                 if (tokenData.access_token) {
                     const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
                         headers: { Authorization: `Bearer ${tokenData.access_token}` },
                     });
                     const userData = await userRes.json();
                     if (userData.email) {
-                        adcData._email = userData.email;
-                        fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
-                        console.log(`[work_email] ✅ Detected email: ${userData.email}`);
+                        userEmail = userData.email;
+                        console.log(`[work_email] ✅ Detected email: ${userEmail}`);
                     }
                 }
             } catch (e) {
                 console.log('[work_email] ⚠ Could not detect email:', e.message);
             }
+
+            // 2b. Find the right quota project
+            let quotaProject = run('gcloud config get-value project 2>/dev/null');
+            if (!quotaProject) {
+                const env = readEnv();
+                if (env['FIREBASE_PROJECT_ID']) quotaProject = env['FIREBASE_PROJECT_ID'];
+            }
+            if (!quotaProject) {
+                quotaProject = run('gcloud projects list --format="value(projectId)" --limit=1 2>/dev/null');
+            }
+
+            // 2c. Enable Gmail API on the project
+            if (quotaProject) {
+                console.log(`[work_email] Enabling Gmail API on ${quotaProject}...`);
+                run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
+            }
+
+            // 2d. Grant serviceUsageConsumer to the authenticated user
+            if (userEmail && quotaProject) {
+                console.log(`[work_email] Granting serviceUsageConsumer to ${userEmail} on ${quotaProject}...`);
+                run(`gcloud projects add-iam-policy-binding ${quotaProject} --member="user:${userEmail}" --role="roles/serviceusage.serviceUsageConsumer" --condition=None --quiet 2>/dev/null`);
+            }
+
+            // 2e. Re-save token with email + quota project
+            try {
+                if (userEmail) adcData._email = userEmail;
+                if (quotaProject) adcData.quota_project_id = quotaProject;
+                fs.writeFileSync(tokenFile, JSON.stringify(adcData, null, 2));
+                console.log(`[work_email] ✅ Updated token: email=${userEmail}, quota=${quotaProject}`);
+            } catch (e) {
+                console.log('[work_email] ⚠ Could not update token file:', e.message);
+            }
+
+            console.log('[work_email] ✅ Post-login setup complete!');
         })();
-
-        // 4. Slow setup (runs after token is saved — UI already shows connected)
-        if (!quotaProject) {
-            const first = run('gcloud projects list --format="value(projectId)" --limit=1 2>/dev/null');
-            if (first) quotaProject = first;
-        }
-        if (quotaProject) {
-            console.log(`[work_email] Enabling Gmail API on ${quotaProject}...`);
-            run(`gcloud services enable gmail.googleapis.com --project=${quotaProject} 2>/dev/null`);
-        }
-
-        console.log('[work_email] ✅ Post-login setup complete!');
     });
 
     res.json({ status: 'started', message: 'Browser should open for Work Email login. Complete the login there.' });
