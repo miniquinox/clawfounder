@@ -32,73 +32,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(PROJECT_ROOT / ".env")
-except ImportError:
-    pass
-
-# ── Shared helpers (same as chat_agent.py) ───────────────────────
-
-def emit(event):
-    """Write a JSONL event to stdout."""
-    print(json.dumps(event, default=str), flush=True)
-
-
-def _read_accounts_registry():
-    accounts_file = Path.home() / ".clawfounder" / "accounts.json"
-    if accounts_file.exists():
-        try:
-            return json.loads(accounts_file.read_text())
-        except Exception:
-            pass
-    return {"version": 1, "accounts": {}}
-
-
-def load_all_connectors():
-    """Load all connectors that have their deps available."""
-    connectors_dir = PROJECT_ROOT / "connectors"
-    registry = _read_accounts_registry()
-    loaded = {}
-
-    for folder in sorted(connectors_dir.iterdir()):
-        if not folder.is_dir() or folder.name.startswith("_") or folder.name.startswith("."):
-            continue
-        try:
-            spec = importlib.util.spec_from_file_location(
-                f"connectors.{folder.name}.connector",
-                folder / "connector.py",
-                submodule_search_locations=[str(folder)],
-            )
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-
-            if not (hasattr(module, "TOOLS") and hasattr(module, "handle")):
-                continue
-
-            supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
-            reg_accounts = registry.get("accounts", {}).get(folder.name, [])
-            enabled_accounts = [a for a in reg_accounts if a.get("enabled", True)]
-
-            if enabled_accounts:
-                loaded[folder.name] = {
-                    "module": module,
-                    "accounts": enabled_accounts,
-                    "supports_multi": supports_multi,
-                }
-            else:
-                if hasattr(module, "is_connected") and callable(module.is_connected):
-                    if not module.is_connected():
-                        continue
-                loaded[folder.name] = {
-                    "module": module,
-                    "accounts": [],
-                    "supports_multi": supports_multi,
-                }
-        except Exception:
-            pass
-
-    return loaded
+from agent_shared import (
+    setup_env, emit, load_all_connectors, call_tool as _call_tool, get_briefing as _get_briefing,
+)
+setup_env()
 
 
 # Voice-appropriate tools — keeps the Live API under its tool limit
@@ -168,82 +105,6 @@ def build_tools_and_map(connectors):
     return all_tools, tool_map
 
 
-_CACHEABLE_PREFIXES = (
-    "gmail_get_unread", "gmail_search", "gmail_read_email", "gmail_list_labels",
-    "work_email_get_unread", "work_email_search", "work_email_read_email",
-    "github_list_repos", "github_get_repo", "github_notifications", "github_list_prs",
-    "github_list_issues", "github_get_issue", "github_get_pr", "github_search",
-    "github_get_commits", "github_list_branches", "github_list_releases",
-    "github_get_file", "github_get_me", "github_list_tags", "github_list_gists",
-    "yahoo_finance_quote", "yahoo_finance_history", "yahoo_finance_search",
-    "telegram_get_updates",
-)
-
-
-def _call_tool(module, tool_name, args, accounts):
-    """Call a connector's handle() with optional account_id routing + caching + knowledge indexing."""
-    import tool_cache
-    import knowledge_base
-
-    account_id = args.pop("account", None)
-    if account_id is None and len(accounts) == 1:
-        account_id = accounts[0]["id"]
-
-    connector = tool_name.split("_")[0]
-    if tool_name in _CACHEABLE_PREFIXES:
-        cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
-        if cached is not None:
-            knowledge_base.index(connector, tool_name, cached, args, account_id)
-            return cached
-
-    supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
-    if supports_multi and account_id:
-        result = module.handle(tool_name, args, account_id=account_id)
-    else:
-        result = module.handle(tool_name, args)
-
-    if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
-        tool_cache.put(tool_name, args, result, account_id=account_id)
-
-    if isinstance(result, str):
-        knowledge_base.index(connector, tool_name, result, args, account_id)
-
-    return result
-
-
-def _get_briefing(connectors):
-    """Gather data from all connected services and return a summary."""
-    # Import briefing helpers
-    briefing_path = Path(__file__).parent / "briefing_agent.py"
-    spec = importlib.util.spec_from_file_location("briefing_agent", briefing_path)
-    briefing_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(briefing_mod)
-
-    # Load briefing config (user's watchlist, repos, etc.)
-    config_file = Path.home() / ".clawfounder" / "briefing_config.json"
-    connector_configs = {}
-    if config_file.exists():
-        try:
-            connector_configs = json.loads(config_file.read_text()).get("connectors", {})
-        except Exception:
-            pass
-
-    # Gather raw data from all connectors
-    gathered = briefing_mod.gather_data(connectors, connector_configs)
-
-    # Format as a readable summary for the voice model
-    parts = []
-    for conn_name, data in gathered.items():
-        for item in data:
-            result = item.get("result", item.get("error", ""))
-            label = item.get("account", conn_name)
-            # Truncate per-connector results for voice
-            result_str = str(result)[:2000]
-            parts.append(f"[{conn_name}] {item.get('tool', '')} ({label}):\n{result_str}")
-
-    return "\n\n".join(parts) if parts else "No data available from connected services."
-
-
 # Briefing tool definition for Gemini
 BRIEFING_TOOL_DEF = {
     "name": "get_briefing",
@@ -257,17 +118,27 @@ def build_system_prompt(connectors):
     connectors_dir = PROJECT_ROOT / "connectors"
 
     lines = [
-        "You are ClawFounder — a personal AI voice assistant that takes real actions "
-        "using connected services. You are speaking to the user via voice.",
+        "You are ClawFounder — a sharp, proactive project manager who knows everything about "
+        "the user's work. You take real actions using connected services. You are speaking "
+        "to the user via voice — be punchy, direct, and useful.",
         "",
         "## Voice Behavior",
-        "- Keep responses SHORT and conversational — you are speaking, not writing.",
+        "- Keep responses SHORT and conversational — 2-3 sentences max. You are speaking, not writing.",
         "- Don't use markdown, bullet points, or formatting — just speak naturally.",
-        "- When using tools, briefly say what you're doing (e.g., 'Let me check your emails...').",
+        "- When using tools, briefly say what you're doing (e.g., 'Checking your emails now...' or 'Let me look that up...').",
         "- For read-only actions, just do them. For actions that send/modify/delete, confirm first.",
-        "- Summarize results verbally — don't read out raw data.",
-        "- When the user asks for a summary, briefing, or 'what's going on', use the get_briefing tool to fetch everything at once rather than calling individual tools.",
-        "- When the user mentions a person, project, or topic, use search_knowledge FIRST to check for relevant context across all services before making direct tool calls.",
+        "- Summarize results verbally — don't read out raw data. Give the highlights.",
+        "- After completing a task, suggest a natural next step. For example: after reading emails, say 'Want me to reply to any of these?'",
+        "",
+        "## Proactive Behavior",
+        "- When the user asks for a summary, briefing, or 'what's going on', use the get_briefing tool.",
+        "- When the user mentions a person, project, or topic, use search_knowledge FIRST to check for relevant context.",
+        "- If the user mentions being blocked, frustrated, or waiting on something, proactively search your knowledge to see if you can help unblock them.",
+        "- Connect dots across services — if an email mentions a PR, and the user asks about that PR, mention the email context too.",
+        "",
+        "## Error Recovery",
+        "- If a tool fails, say something natural like 'I couldn't reach GitHub right now' and offer to check what you know from earlier.",
+        "- Never go silent — always give a verbal response, even if it's 'I ran into an issue, let me try another way.'",
         "",
     ]
 
@@ -292,6 +163,18 @@ def build_system_prompt(connectors):
                 for acct in accounts:
                     lines.append(f"- `{acct['id']}`: {acct.get('label', acct['id'])}")
                 lines.append("")
+
+    # Add knowledge base summary (what the agent already knows)
+    try:
+        import knowledge_base
+        kb_summary = knowledge_base.get_summary()
+        if kb_summary:
+            lines.append("## Memory")
+            lines.append(f"You have context from past interactions. {kb_summary}")
+            lines.append("Use search_knowledge to look up details about any person or topic.")
+            lines.append("")
+    except Exception:
+        pass
 
     return "\n".join(lines)
 
@@ -488,7 +371,18 @@ async def _run_live_session(client, config, loop, tool_map, connectors):
                                         try:
                                             return _call_tool(module, tn, dict(a), accounts)
                                         except Exception as e:
-                                            return f"Tool error: {e}"
+                                            # Fallback: search knowledge base for relevant context
+                                            _log(f"Tool {tn} failed: {e}, trying KB fallback")
+                                            try:
+                                                import knowledge_base
+                                                query = " ".join(str(v) for v in a.values() if v)[:100]
+                                                kb_result = knowledge_base.search(query or tn, max_results=3)
+                                                return (
+                                                    f"The {conn_name} service returned an error: {e}. "
+                                                    f"However, here's what I found from earlier interactions: {kb_result}"
+                                                )
+                                            except Exception:
+                                                return f"Tool error: {e}. The service might be temporarily unavailable."
                                     return f"Unknown tool: {tn}"
 
                                 result = await loop.run_in_executor(

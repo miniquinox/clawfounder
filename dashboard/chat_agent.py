@@ -23,87 +23,15 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(PROJECT_ROOT / ".env")
-except ImportError:
-    pass
-
-
-def emit(event):
-    """Write a JSONL event to stdout."""
-    print(json.dumps(event, default=str), flush=True)
+from agent_shared import (
+    setup_env, emit, load_all_connectors, call_tool as _call_tool, get_briefing as _get_briefing,
+)
+setup_env()
 
 
 def _log(msg):
     """Log to stderr (visible in server.js but not in JSONL stdout)."""
     print(f"[chat] {msg}", file=sys.stderr, flush=True)
-
-
-# ── Load connectors ─────────────────────────────────────────────
-
-def _read_accounts_registry():
-    """Read the accounts registry from ~/.clawfounder/accounts.json."""
-    accounts_file = Path.home() / ".clawfounder" / "accounts.json"
-    if accounts_file.exists():
-        try:
-            return json.loads(accounts_file.read_text())
-        except Exception:
-            pass
-    return {"version": 1, "accounts": {}}
-
-
-def load_all_connectors():
-    """Load all connectors that have their deps available.
-
-    Returns a dict of {conn_name: {"module": module, "accounts": [...], "supports_multi": bool}}.
-    """
-    connectors_dir = PROJECT_ROOT / "connectors"
-    registry = _read_accounts_registry()
-    loaded = {}
-
-    for folder in sorted(connectors_dir.iterdir()):
-        if not folder.is_dir() or folder.name.startswith("_") or folder.name.startswith("."):
-            continue
-
-        try:
-            spec = importlib.util.spec_from_file_location(
-                f"connectors.{folder.name}.connector",
-                folder / "connector.py",
-                submodule_search_locations=[str(folder)],
-            )
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-
-            if not (hasattr(module, "TOOLS") and hasattr(module, "handle")):
-                continue
-
-            supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
-            reg_accounts = registry.get("accounts", {}).get(folder.name, [])
-            # Filter to only enabled accounts
-            enabled_accounts = [a for a in reg_accounts if a.get("enabled", True)]
-
-            if enabled_accounts:
-                # At least one enabled account exists in the registry
-                loaded[folder.name] = {
-                    "module": module,
-                    "accounts": enabled_accounts,
-                    "supports_multi": supports_multi,
-                }
-            else:
-                # Fall back to legacy is_connected() check when no registry entry
-                if hasattr(module, "is_connected") and callable(module.is_connected):
-                    if not module.is_connected():
-                        continue
-                loaded[folder.name] = {
-                    "module": module,
-                    "accounts": [],
-                    "supports_multi": supports_multi,
-                }
-        except Exception:
-            pass  # Skip connectors with missing deps
-
-    return loaded
 
 
 def build_tools_and_map(connectors, allowed_tools=None):
@@ -297,57 +225,19 @@ def build_system_prompt(connectors):
             )
             lines.append("")
 
+    # Add knowledge base summary (what the agent already knows)
+    try:
+        import knowledge_base
+        kb_summary = knowledge_base.get_summary()
+        if kb_summary:
+            lines.append("## Memory")
+            lines.append(f"You have a knowledge base with indexed data from past interactions. {kb_summary}")
+            lines.append("Use the search_knowledge tool to look up details about any person, project, or topic mentioned above.")
+            lines.append("")
+    except Exception:
+        pass
+
     return "\n".join(lines)
-
-
-# ── Tool execution helper ────────────────────────────────────────
-
-# Read-only tools that are safe to cache
-_CACHEABLE_PREFIXES = (
-    "gmail_get_unread", "gmail_search", "gmail_read_email", "gmail_list_labels",
-    "work_email_get_unread", "work_email_search", "work_email_read_email",
-    "github_list_repos", "github_get_repo", "github_notifications", "github_list_prs",
-    "github_list_issues", "github_get_issue", "github_get_pr", "github_search",
-    "github_get_commits", "github_list_branches", "github_list_releases",
-    "github_get_file", "github_get_me", "github_list_tags", "github_list_gists",
-    "yahoo_finance_quote", "yahoo_finance_history", "yahoo_finance_search",
-    "telegram_get_updates",
-)
-
-
-def _call_tool(module, tool_name, args, accounts):
-    """Call a connector's handle() with optional account_id routing + caching + knowledge indexing."""
-    import tool_cache
-    import knowledge_base
-
-    account_id = args.pop("account", None)
-    # Auto-select if only 1 account
-    if account_id is None and len(accounts) == 1:
-        account_id = accounts[0]["id"]
-
-    # Check cache for read-only tools
-    connector = tool_name.split("_")[0]
-    if tool_name in _CACHEABLE_PREFIXES:
-        cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
-        if cached is not None:
-            knowledge_base.index(connector, tool_name, cached, args, account_id)
-            return cached
-
-    supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
-    if supports_multi and account_id:
-        result = module.handle(tool_name, args, account_id=account_id)
-    else:
-        result = module.handle(tool_name, args)
-
-    # Cache the result for read-only tools
-    if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
-        tool_cache.put(tool_name, args, result, account_id=account_id)
-
-    # Index into knowledge base (fire-and-forget)
-    if isinstance(result, str):
-        knowledge_base.index(connector, tool_name, result, args, account_id)
-
-    return result
 
 
 # ── Briefing tool ────────────────────────────────────────────────
@@ -363,35 +253,137 @@ BRIEFING_TOOL_DEF = {
 }
 
 
-def _get_briefing(connectors):
-    """Gather data from all connected services and return a summary."""
-    briefing_path = Path(__file__).parent / "briefing_agent.py"
-    spec = importlib.util.spec_from_file_location("briefing_agent", briefing_path)
-    briefing_mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(briefing_mod)
+# ── Parallel tool execution ───────────────────────────────────────
 
-    config_file = Path.home() / ".clawfounder" / "briefing_config.json"
-    connector_configs = {}
-    if config_file.exists():
+def _execute_tool(tool_name, args, tool_map, connectors):
+    """Execute a single tool call. Returns (tool_name, conn_name, result)."""
+    conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
+
+    if tool_name == "get_briefing":
         try:
-            connector_configs = json.loads(config_file.read_text()).get("connectors", {})
+            result = _get_briefing(connectors)
+        except Exception as e:
+            result = f"Briefing error: {e}"
+    elif tool_name == "search_knowledge":
+        try:
+            import knowledge_base
+            result = knowledge_base.search(
+                args.get("query", ""),
+                connector=args.get("connector"),
+                max_results=args.get("max_results", 10),
+            )
+        except Exception as e:
+            result = f"Knowledge search error: {e}"
+    elif module:
+        try:
+            result = _call_tool(module, tool_name, args, accounts, conn_name=conn_name)
+        except Exception as e:
+            result = f"Tool error: {e}"
+    else:
+        result = f"Unknown tool: {tool_name}"
+
+    return (tool_name, conn_name, result)
+
+
+def _execute_tools_parallel(tool_calls_list, tool_map, connectors):
+    """Execute multiple tool calls in parallel using threads.
+
+    tool_calls_list: list of (tool_name, args) tuples
+    Returns: list of (tool_name, conn_name, result) tuples in the same order.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if len(tool_calls_list) <= 1:
+        # No benefit from parallelism for a single call
+        results = []
+        for tool_name, args in tool_calls_list:
+            results.append(_execute_tool(tool_name, args, tool_map, connectors))
+        return results
+
+    results = [None] * len(tool_calls_list)
+    with ThreadPoolExecutor(max_workers=min(len(tool_calls_list), 5)) as executor:
+        future_to_idx = {}
+        for idx, (tool_name, args) in enumerate(tool_calls_list):
+            future = executor.submit(_execute_tool, tool_name, args, tool_map, connectors)
+            future_to_idx[future] = idx
+
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as e:
+                tn, _ = tool_calls_list[idx]
+                results[idx] = (tn, "unknown", f"Tool error: {e}")
+
+    return results
+
+
+# ── Proactive Knowledge Surfacing ─────────────────────────────────
+
+def _proactive_search(message):
+    """Search the knowledge base proactively before the model call.
+
+    Returns a context string to prepend to the user message, or None.
+    Skips short confirmation messages to avoid unnecessary latency.
+    """
+    if not message or len(message.strip()) < 15:
+        return None
+    try:
+        import knowledge_base
+        context = knowledge_base.quick_search(message)
+        if context:
+            return (
+                "[CONTEXT FROM YOUR CONNECTED SERVICES — use this if relevant to the user's question:\n"
+                f"{context}\n"
+                "Do NOT mention this context unless it's relevant to what the user is asking.]\n\n"
+            )
+    except Exception:
+        pass
+    return None
+
+
+# ── Shared provider setup ─────────────────────────────────────────
+
+def _provider_setup(message, connectors, router_api_key=None):
+    """Run router + system prompt + proactive search in parallel.
+
+    The router LLM call runs in a background thread while
+    the system prompt and proactive search happen on the main thread.
+    Returns (all_tool_defs, tool_map, system, enriched_message).
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    # Start router in background thread (300-800ms LLM call)
+    import tool_router
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        router_future = executor.submit(tool_router.route, message, connectors, router_api_key)
+
+        # While router runs, do other setup work on main thread
+        system = build_system_prompt(connectors)
+        kb_context = _proactive_search(message)
+        enriched_message = (kb_context + message) if kb_context else message
+        if kb_context:
+            emit({"type": "thinking", "text": "Found relevant context from knowledge base"})
+
+        # Now wait for router result
+        try:
+            allowed_tools = router_future.result(timeout=5)
         except Exception:
-            pass
+            allowed_tools = None
 
-    gathered = briefing_mod.gather_data(connectors, connector_configs)
+    if allowed_tools:
+        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
 
-    parts = []
-    for conn_name, data in gathered.items():
-        for item in data:
-            result = item.get("result", item.get("error", ""))
-            label = item.get("account", conn_name)
-            result_str = str(result)[:3000]
-            parts.append(f"[{conn_name}] {item.get('tool', '')} ({label}):\n{result_str}")
+    # Build tool definitions
+    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
+    all_tool_defs.append(BRIEFING_TOOL_DEF)
+    tool_map["get_briefing"] = ("_briefing", None, [])
 
-    return "\n\n".join(parts) if parts else "No data available from connected services."
+    import knowledge_base
+    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
+    tool_map["search_knowledge"] = ("_knowledge", None, [])
 
-
-# ── Tool router (LLM-powered) ────────────────────────────────────
+    return all_tool_defs, tool_map, system, enriched_message
 
 
 # ── Provider: Gemini ─────────────────────────────────────────────
@@ -410,20 +402,8 @@ def run_gemini(message, history, connectors):
 
     client = genai.Client(api_key=api_key)
 
-    # Smart tool routing — LLM picks relevant tools
-    import tool_router
-    allowed_tools = tool_router.route(message, connectors, api_key)
-    if allowed_tools:
-        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
-
-    # Build tool declarations from connectors + briefing + knowledge
-    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
-    all_tool_defs.append(BRIEFING_TOOL_DEF)
-    tool_map["get_briefing"] = ("_briefing", None, [])
-
-    import knowledge_base
-    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
-    tool_map["search_knowledge"] = ("_knowledge", None, [])
+    # Parallel setup: router + system prompt + proactive search
+    all_tool_defs, tool_map, system, enriched_message = _provider_setup(message, connectors, api_key)
 
     gemini_fns = []
     for tool in all_tool_defs:
@@ -435,8 +415,6 @@ def run_gemini(message, history, connectors):
 
     gemini_tools = types.Tool(function_declarations=gemini_fns) if gemini_fns else None
 
-    system = build_system_prompt(connectors)
-
     # Build conversation history
     contents = []
     for msg in history:
@@ -447,7 +425,7 @@ def run_gemini(message, history, connectors):
         ))
     contents.append(types.Content(
         role="user",
-        parts=[types.Part(text=message)],
+        parts=[types.Part(text=enriched_message)],
     ))
 
     config = types.GenerateContentConfig(
@@ -526,46 +504,26 @@ def run_gemini(message, history, connectors):
         if not function_calls:
             break
 
-        # Execute tool calls
-        function_response_parts = []
+        # Execute tool calls in parallel
+        tool_calls_list = []
         for part in function_calls:
             fc = part.function_call
             tool_name = fc.name
             args = dict(fc.args) if fc.args else {}
-            conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
-
+            conn_name = tool_map.get(tool_name, ("unknown", None, []))[0]
             emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
+            tool_calls_list.append((tool_name, args))
 
-            if tool_name == "get_briefing":
-                try:
-                    result = _get_briefing(connectors)
-                except Exception as e:
-                    result = f"Briefing error: {e}"
-            elif tool_name == "search_knowledge":
-                try:
-                    import knowledge_base
-                    result = knowledge_base.search(
-                        args.get("query", ""),
-                        connector=args.get("connector"),
-                        max_results=args.get("max_results", 10),
-                    )
-                except Exception as e:
-                    result = f"Knowledge search error: {e}"
-            elif module:
-                try:
-                    result = _call_tool(module, tool_name, args, accounts)
-                except Exception as e:
-                    result = f"Tool error: {e}"
-            else:
-                result = f"Unknown tool: {tool_name}"
+        results = _execute_tools_parallel(tool_calls_list, tool_map, connectors)
 
+        function_response_parts = []
+        for tool_name, conn_name, result in results:
             truncated = len(result) > 500 if isinstance(result, str) else False
             emit({
                 "type": "tool_result", "tool": tool_name, "connector": conn_name,
                 "result": result[:2000] if isinstance(result, str) else str(result)[:2000],
                 "truncated": truncated,
             })
-
             function_response_parts.append(
                 types.Part(function_response=types.FunctionResponse(
                     name=tool_name,
@@ -596,21 +554,9 @@ def run_openai(message, history, connectors):
 
     emit({"type": "thinking", "text": "Connecting to OpenAI..."})
 
-    # Smart tool routing — uses Gemini API key for routing even with OpenAI provider
-    import tool_router
+    # Parallel setup: router + system prompt + proactive search
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    allowed_tools = tool_router.route(message, connectors, gemini_key)
-    if allowed_tools:
-        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
-
-    # Build tool definitions + briefing + knowledge
-    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
-    all_tool_defs.append(BRIEFING_TOOL_DEF)
-    tool_map["get_briefing"] = ("_briefing", None, [])
-
-    import knowledge_base
-    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
-    tool_map["search_knowledge"] = ("_knowledge", None, [])
+    all_tool_defs, tool_map, system_prompt, enriched_message = _provider_setup(message, connectors, gemini_key)
 
     tool_defs = []
     for tool in all_tool_defs:
@@ -623,10 +569,10 @@ def run_openai(message, history, connectors):
             },
         })
 
-    messages = [{"role": "system", "content": build_system_prompt(connectors)}]
+    messages = [{"role": "system", "content": system_prompt}]
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["text"]})
-    messages.append({"role": "user", "content": message})
+    messages.append({"role": "user", "content": enriched_message})
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
 
@@ -654,42 +600,26 @@ def run_openai(message, history, connectors):
         if msg.get("tool_calls"):
             messages.append(msg)
 
+            # Collect and execute tool calls in parallel
+            tool_calls_list = []
+            tc_ids = []
             for tc in msg["tool_calls"]:
                 tool_name = tc["function"]["name"]
                 args = json.loads(tc["function"]["arguments"]) if tc["function"].get("arguments") else {}
-                conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
-
+                conn_name = tool_map.get(tool_name, ("unknown", None, []))[0]
                 emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
+                tool_calls_list.append((tool_name, args))
+                tc_ids.append(tc["id"])
 
-                if tool_name == "get_briefing":
-                    try:
-                        result = _get_briefing(connectors)
-                    except Exception as e:
-                        result = f"Briefing error: {e}"
-                elif tool_name == "search_knowledge":
-                    try:
-                        result = knowledge_base.search(
-                            args.get("query", ""),
-                            connector=args.get("connector"),
-                            max_results=args.get("max_results", 10),
-                        )
-                    except Exception as e:
-                        result = f"Knowledge search error: {e}"
-                elif module:
-                    try:
-                        result = _call_tool(module, tool_name, args, accounts)
-                    except Exception as e:
-                        result = f"Tool error: {e}"
-                else:
-                    result = f"Unknown tool: {tool_name}"
+            results = _execute_tools_parallel(tool_calls_list, tool_map, connectors)
 
+            for (tool_name, conn_name, result), tc_id in zip(results, tc_ids):
                 emit({
                     "type": "tool_result", "tool": tool_name, "connector": conn_name,
                     "result": result[:2000] if isinstance(result, str) else str(result)[:2000],
                     "truncated": len(result) > 500 if isinstance(result, str) else False,
                 })
-
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+                messages.append({"role": "tool", "tool_call_id": tc_id, "content": result})
         else:
             if msg.get("content"):
                 emit({"type": "text", "text": msg["content"]})
@@ -710,21 +640,9 @@ def run_claude(message, history, connectors):
 
     emit({"type": "thinking", "text": "Connecting to Claude..."})
 
-    # Smart tool routing
-    import tool_router
+    # Parallel setup: router + system prompt + proactive search
     gemini_key = os.environ.get("GEMINI_API_KEY")
-    allowed_tools = tool_router.route(message, connectors, gemini_key)
-    if allowed_tools:
-        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
-
-    # Build tool definitions + briefing + knowledge
-    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
-    all_tool_defs.append(BRIEFING_TOOL_DEF)
-    tool_map["get_briefing"] = ("_briefing", None, [])
-
-    import knowledge_base
-    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
-    tool_map["search_knowledge"] = ("_knowledge", None, [])
+    all_tool_defs, tool_map, system, enriched_message = _provider_setup(message, connectors, gemini_key)
 
     tool_defs = []
     for tool in all_tool_defs:
@@ -737,7 +655,7 @@ def run_claude(message, history, connectors):
     messages = []
     for msg in history:
         messages.append({"role": msg["role"], "content": msg["text"]})
-    messages.append({"role": "user", "content": message})
+    messages.append({"role": "user", "content": enriched_message})
 
     headers = {
         "x-api-key": api_key,
@@ -750,7 +668,7 @@ def run_claude(message, history, connectors):
         body = {
             "model": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             "max_tokens": 4096,
-            "system": build_system_prompt(connectors),
+            "system": system,
             "messages": messages,
         }
         if tool_defs:
@@ -770,50 +688,38 @@ def run_claude(message, history, connectors):
         has_tool_use = False
         tool_results = []
 
+        # Emit text blocks and collect tool_use blocks
+        tool_use_blocks = []
         for block in data.get("content", []):
             if block["type"] == "text":
-                if not has_tool_use:
-                    emit({"type": "text", "text": block["text"]})
-
+                emit({"type": "text", "text": block["text"]})
             elif block["type"] == "tool_use":
                 has_tool_use = True
+                tool_use_blocks.append(block)
+
+        if tool_use_blocks:
+            # Collect and execute tool calls in parallel
+            tool_calls_list = []
+            block_ids = []
+            for block in tool_use_blocks:
                 tool_name = block["name"]
                 args = block.get("input", {})
-                conn_name, module, accounts = tool_map.get(tool_name, ("unknown", None, []))
-
+                conn_name = tool_map.get(tool_name, ("unknown", None, []))[0]
                 emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
+                tool_calls_list.append((tool_name, args))
+                block_ids.append(block["id"])
 
-                if tool_name == "get_briefing":
-                    try:
-                        result = _get_briefing(connectors)
-                    except Exception as e:
-                        result = f"Briefing error: {e}"
-                elif tool_name == "search_knowledge":
-                    try:
-                        result = knowledge_base.search(
-                            args.get("query", ""),
-                            connector=args.get("connector"),
-                            max_results=args.get("max_results", 10),
-                        )
-                    except Exception as e:
-                        result = f"Knowledge search error: {e}"
-                elif module:
-                    try:
-                        result = _call_tool(module, tool_name, args, accounts)
-                    except Exception as e:
-                        result = f"Tool error: {e}"
-                else:
-                    result = f"Unknown tool: {tool_name}"
+            results = _execute_tools_parallel(tool_calls_list, tool_map, connectors)
 
+            for (tool_name, conn_name, result), block_id in zip(results, block_ids):
                 emit({
                     "type": "tool_result", "tool": tool_name, "connector": conn_name,
                     "result": result[:2000] if isinstance(result, str) else str(result)[:2000],
                     "truncated": len(result) > 500 if isinstance(result, str) else False,
                 })
-
                 tool_results.append({
                     "type": "tool_result",
-                    "tool_use_id": block["id"],
+                    "tool_use_id": block_id,
                     "content": result,
                 })
 

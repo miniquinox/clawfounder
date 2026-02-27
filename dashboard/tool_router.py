@@ -157,6 +157,15 @@ def route(message, connectors, api_key=None):
     build_tools_and_map() to only include these tools.
     Returns None if all tools should be included (small connector set).
     """
+    # Skip routing for short confirmation messages (saves 300-800ms)
+    stripped = message.strip().lower()
+    if len(stripped) < 20 or stripped in (
+        "yes", "yep", "yeah", "no", "nope", "send it", "go", "do it",
+        "confirm", "ok", "okay", "sure", "cancel", "stop", "thanks",
+        "thank you", "go ahead", "sounds good", "send", "yes please",
+    ):
+        return None  # Let all tools through for quick follow-ups
+
     # Not worth routing for small connector sets
     total_tools = sum(len(info["module"].TOOLS) for info in connectors.values())
     if total_tools <= MAX_TOOLS:

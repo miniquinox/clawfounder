@@ -278,6 +278,46 @@ def _get_gmail_service(account_id=None):
 
 # ─── Tool Implementations ──────────────────────────────────────
 
+_METADATA_HEADERS = ["From", "To", "Subject", "Date", "Reply-To", "Message-ID"]
+
+
+def _batch_get_messages(service, message_refs):
+    """Fetch multiple messages in a single batch request (1 HTTP call instead of N)."""
+    results = {}
+
+    def _callback(request_id, response, exception):
+        if exception is None:
+            results[request_id] = response
+
+    batch = service.new_batch_http_request(callback=_callback)
+    for msg_ref in message_refs:
+        batch.add(
+            service.users().messages().get(
+                userId="me", id=msg_ref["id"], format="metadata",
+                metadataHeaders=_METADATA_HEADERS,
+            ),
+            request_id=msg_ref["id"],
+        )
+    batch.execute()
+
+    # Return in original order
+    output = []
+    for msg_ref in message_refs:
+        msg = results.get(msg_ref["id"])
+        if not msg:
+            continue
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+        output.append({
+            "id": msg_ref["id"],
+            "from": headers.get("From", "Unknown"),
+            "to": headers.get("To", "Unknown"),
+            "subject": headers.get("Subject", "(no subject)"),
+            "date": headers.get("Date", "Unknown"),
+            "snippet": msg.get("snippet", ""),
+        })
+    return output
+
+
 def _get_unread(max_results: int = 10, account_id=None) -> str:
     service = _get_gmail_service(account_id)
     results = service.users().messages().list(
@@ -288,23 +328,7 @@ def _get_unread(max_results: int = 10, account_id=None) -> str:
     if not messages:
         return "No unread emails."
 
-    output = []
-    _METADATA_HEADERS = ["From", "To", "Subject", "Date", "Reply-To", "Message-ID"]
-    for msg_ref in messages:
-        msg = service.users().messages().get(
-            userId="me", id=msg_ref["id"], format="metadata",
-            metadataHeaders=_METADATA_HEADERS,
-        ).execute()
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        output.append({
-            "id": msg_ref["id"],
-            "from": headers.get("From", "Unknown"),
-            "to": headers.get("To", "Unknown"),
-            "subject": headers.get("Subject", "(no subject)"),
-            "date": headers.get("Date", "Unknown"),
-            "snippet": msg.get("snippet", ""),
-        })
-
+    output = _batch_get_messages(service, messages)
     return json.dumps(output, indent=2)
 
 
@@ -318,23 +342,7 @@ def _search(query: str, max_results: int = 5, account_id=None) -> str:
     if not messages:
         return f"No emails found for query: {query}"
 
-    output = []
-    _METADATA_HEADERS = ["From", "To", "Subject", "Date", "Reply-To", "Message-ID"]
-    for msg_ref in messages:
-        msg = service.users().messages().get(
-            userId="me", id=msg_ref["id"], format="metadata",
-            metadataHeaders=_METADATA_HEADERS,
-        ).execute()
-        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
-        output.append({
-            "id": msg_ref["id"],
-            "from": headers.get("From", "Unknown"),
-            "to": headers.get("To", "Unknown"),
-            "subject": headers.get("Subject", "(no subject)"),
-            "date": headers.get("Date", "Unknown"),
-            "snippet": msg.get("snippet", ""),
-        })
-
+    output = _batch_get_messages(service, messages)
     return json.dumps(output, indent=2)
 
 
@@ -425,7 +433,7 @@ def _reply(message_id: str, body: str, account_id=None) -> str:
     thread_id = original.get("threadId")
 
     reply_msg = MIMEText(body)
-    reply_msg["to"] = headers.get("From", headers.get("Reply-To", ""))
+    reply_msg["to"] = headers.get("Reply-To", headers.get("From", ""))
     reply_msg["subject"] = "Re: " + headers.get("Subject", "").removeprefix("Re: ")
     reply_msg["In-Reply-To"] = headers.get("Message-ID", "")
     reply_msg["References"] = headers.get("Message-ID", "")

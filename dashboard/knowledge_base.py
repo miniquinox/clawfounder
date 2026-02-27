@@ -5,18 +5,155 @@ SQLite-backed cross-service memory. Passively indexes tool call results
 and provides full-text search across all connected services.
 
 Storage: ~/.clawfounder/knowledge.db (WAL mode for concurrent reads)
+Config:  ~/.clawfounder/knowledge_config.json (user-customizable settings)
 """
 
 import json
 import re
 import sqlite3
-import hashlib
 from datetime import datetime
 from pathlib import Path
 from email.utils import parsedate_to_datetime
 
-_DB_PATH = Path.home() / ".clawfounder" / "knowledge.db"
+_CLAWFOUNDER_DIR = Path.home() / ".clawfounder"
+_DB_PATH = _CLAWFOUNDER_DIR / "knowledge.db"
+_CONFIG_PATH = _CLAWFOUNDER_DIR / "knowledge_config.json"
 _db_conn = None
+_config_cache = None
+
+# ── Configuration ──────────────────────────────────────────────────
+
+# Default configuration values
+_DEFAULT_CONFIG = {
+    "version": 1,
+
+    # Data retention
+    "retention_days": 90,           # Auto-delete items older than this
+
+    # Search limits
+    "default_max_results": 10,      # Default search result count
+    "quick_search_max_results": 5,  # Results per entity in quick_search
+    "entity_extract_limit": 8,      # Max entities extracted from message
+
+    # Snippet/text truncation
+    "snippet_length": 200,          # Max snippet length stored
+    "title_display_length": 80,     # Title truncation for display
+    "snippet_display_length": 100,  # Snippet truncation for display
+
+    # Cache settings
+    "summary_cache_ttl": 300,       # Summary cache TTL in seconds (5 min)
+
+    # Topic extraction - base topics (always included)
+    "base_topics": [
+        "firebase", "supabase", "api key", "api keys", "deployment", "deploy",
+        "production", "staging", "database", "auth", "authentication",
+        "payment", "invoice", "contract", "deadline", "meeting", "review",
+        "merge", "release", "bug", "fix", "feature", "sprint", "standup",
+        "credentials", "password", "token", "secret", "config", "migration",
+        "docker", "kubernetes", "ci/cd", "pipeline", "terraform",
+    ],
+
+    # User-defined additional topics (extend base_topics)
+    "custom_topics": [],
+
+    # Max topics to extract per item
+    "max_topics_per_item": 5,
+}
+
+
+def _load_config():
+    """Load config from disk, merging with defaults. Cached in memory."""
+    global _config_cache
+    if _config_cache is not None:
+        return _config_cache
+
+    config = _DEFAULT_CONFIG.copy()
+
+    if _CONFIG_PATH.exists():
+        try:
+            user_config = json.loads(_CONFIG_PATH.read_text())
+            # Merge user config into defaults (user values override defaults)
+            for key, value in user_config.items():
+                if key in config:
+                    config[key] = value
+        except (json.JSONDecodeError, IOError):
+            pass  # Use defaults on error
+
+    _config_cache = config
+    return config
+
+
+def _get_config(key, default=None):
+    """Get a single config value."""
+    config = _load_config()
+    return config.get(key, default)
+
+
+def save_config(updates):
+    """Save config updates to disk. Merges with existing config.
+
+    Args:
+        updates: dict of config keys to update
+
+    Returns:
+        The updated config dict
+    """
+    global _config_cache, _topics_cache
+
+    # Load existing user config (not merged with defaults)
+    user_config = {}
+    if _CONFIG_PATH.exists():
+        try:
+            user_config = json.loads(_CONFIG_PATH.read_text())
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Update with new values
+    user_config.update(updates)
+    user_config["version"] = 1
+
+    # Write to disk
+    _CLAWFOUNDER_DIR.mkdir(parents=True, exist_ok=True)
+    _CONFIG_PATH.write_text(json.dumps(user_config, indent=2))
+
+    # Invalidate caches
+    _config_cache = None
+    _topics_cache = None
+
+    return _load_config()
+
+
+def get_config():
+    """Get the full merged config (defaults + user overrides).
+
+    Returns:
+        dict with all config values
+    """
+    return _load_config().copy()
+
+
+def reset_config():
+    """Reset config to defaults by removing the config file."""
+    global _config_cache, _topics_cache
+    if _CONFIG_PATH.exists():
+        _CONFIG_PATH.unlink()
+    _config_cache = None
+    _topics_cache = None
+
+
+_topics_cache = None
+
+
+def _get_known_topics():
+    """Get combined set of base + custom topics. Cached in memory."""
+    global _topics_cache
+    if _topics_cache is not None:
+        return _topics_cache
+    config = _load_config()
+    topics = set(config.get("base_topics", []))
+    topics.update(config.get("custom_topics", []))
+    _topics_cache = topics
+    return topics
 
 # ── Schema ────────────────────────────────────────────────────────
 
@@ -74,7 +211,7 @@ def _get_db():
         return _db_conn
 
     _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(_DB_PATH), timeout=5)
+    conn = sqlite3.connect(str(_DB_PATH), timeout=5, check_same_thread=False)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
     try:
@@ -82,9 +219,12 @@ def _get_db():
     except sqlite3.OperationalError:
         pass  # FTS5 may not be available on all builds
 
-    # Auto-cleanup: delete items older than 90 days (once per session)
+    # Auto-cleanup: delete items older than retention period (once per session)
     try:
-        conn.execute("DELETE FROM knowledge_items WHERE indexed_at < datetime('now', '-90 days')")
+        retention_days = _get_config("retention_days", 90)
+        conn.execute(
+            f"DELETE FROM knowledge_items WHERE indexed_at < datetime('now', '-{retention_days} days')"
+        )
         conn.commit()
     except Exception:
         pass
@@ -107,28 +247,22 @@ def _parse_email_address(raw):
     return (raw.strip(), "")
 
 
-KNOWN_TOPICS = {
-    "firebase", "supabase", "api key", "api keys", "deployment", "deploy",
-    "production", "staging", "database", "auth", "authentication",
-    "payment", "invoice", "contract", "deadline", "meeting", "review",
-    "merge", "release", "bug", "fix", "feature", "sprint", "standup",
-    "credentials", "password", "token", "secret", "config", "migration",
-    "docker", "kubernetes", "ci/cd", "pipeline", "terraform",
-}
-
-
 def _extract_topics(text):
     """Extract topic entities from text using keyword matching."""
     if not text:
         return []
+    config = _load_config()
+    known_topics = _get_known_topics()
+    max_topics = config.get("max_topics_per_item", 5)
+
     text_lower = text.lower()
     found = []
-    for topic in KNOWN_TOPICS:
+    for topic in known_topics:
         if topic in text_lower:
             found.append(topic)
     # Jira-style ticket IDs: PROJECT-123
     found.extend(re.findall(r'\b[A-Z]{2,}-\d+\b', text))
-    return list(set(found))[:5]
+    return list(set(found))[:max_topics]
 
 
 def _parse_date(raw):
@@ -152,6 +286,15 @@ def _parse_date(raw):
 
 
 # ── Per-Connector Extractors ──────────────────────────────────────
+
+def _truncate_snippet(text, length=None):
+    """Truncate text to configured snippet length."""
+    if not text:
+        return ""
+    if length is None:
+        length = _get_config("snippet_length", 200)
+    return str(text)[:length]
+
 
 def _extract_gmail(tool_name, result_str, connector, account_id):
     """Extract from gmail_get_unread, gmail_search, gmail_read_email."""
@@ -181,7 +324,7 @@ def _extract_gmail(tool_name, result_str, connector, account_id):
             entities.append(("person", to_email, "recipient"))
 
         subject = email.get("subject", "")
-        snippet = email.get("snippet", email.get("body", ""))[:200]
+        snippet = _truncate_snippet(email.get("snippet", email.get("body", "")))
         for topic in _extract_topics(subject + " " + snippet):
             entities.append(("topic", topic, "mentioned"))
 
@@ -265,7 +408,7 @@ def _extract_github(tool_name, result_str, account_id):
             "source_id": source_id,
             "event_date": _parse_date(item.get("created_at", item.get("updated_at", item.get("created", "")))),
             "title": title,
-            "snippet": str(item.get("body", item.get("body_preview", "")))[:200],
+            "snippet": _truncate_snippet(item.get("body", item.get("body_preview", ""))),
             "metadata": {
                 "repo": repo, "state": item.get("state", ""),
                 "number": number, "url": item.get("url", ""),
@@ -305,7 +448,7 @@ def _extract_telegram(tool_name, result_str, account_id):
             "source_id": source_id,
             "event_date": _parse_date(msg.get("date")),
             "title": f"Message from {sender}",
-            "snippet": text[:200],
+            "snippet": _truncate_snippet(text),
             "metadata": {"from": sender},
             "entities": entities,
         })
@@ -380,7 +523,7 @@ def _extract_firebase(tool_name, result_str, args, account_id):
             "source_id": source_id,
             "event_date": datetime.now().isoformat()[:19],
             "title": f"Firestore: {doc_path or doc_id}",
-            "snippet": json.dumps(preview, default=str)[:200],
+            "snippet": _truncate_snippet(json.dumps(preview, default=str)),
             "metadata": {"path": doc_path, "id": doc_id},
             "entities": entities,
         })
@@ -417,7 +560,7 @@ def _extract_supabase(tool_name, result_str, args, account_id):
             "source_id": source_id,
             "event_date": row.get("created_at", row.get("updated_at", datetime.now().isoformat()[:19])),
             "title": f"{table}/{row_id}",
-            "snippet": json.dumps(row, default=str)[:200],
+            "snippet": _truncate_snippet(json.dumps(row, default=str)),
             "metadata": {"table": table},
             "entities": entities,
         })
@@ -439,6 +582,10 @@ _EXTRACTORS = {
 
 
 # ── Indexing ──────────────────────────────────────────────────────
+
+# Cache entity IDs to avoid repeated SELECTs (type+normalized → id)
+_entity_id_cache = {}
+
 
 def index(connector, tool_name, result, args=None, account_id=None):
     """Index a tool call result into the knowledge base. Never raises."""
@@ -496,10 +643,28 @@ def _index_impl(connector, tool_name, result, args, account_id):
             continue
         item_id = item_id[0]
 
+        # Read old FTS values BEFORE updating (needed for correct FTS delete)
+        old_title, old_snippet, old_entity_text = "", "", ""
+        try:
+            old_row = db.execute(
+                "SELECT title, snippet FROM knowledge_items WHERE id=?", (item_id,)
+            ).fetchone()
+            if old_row:
+                old_title, old_snippet = old_row[0] or "", old_row[1] or ""
+            # Get old entity text for FTS
+            old_entities = db.execute("""
+                SELECT e.value FROM entities e
+                JOIN item_entities ie ON e.id = ie.entity_id
+                WHERE ie.item_id = ?
+            """, (item_id,)).fetchall()
+            old_entity_text = " ".join(r[0] for r in old_entities)
+        except Exception:
+            pass
+
         # Delete old entity links for this item (in case of re-index)
         db.execute("DELETE FROM item_entities WHERE item_id=?", (item_id,))
 
-        # Insert entities and link them
+        # Insert entities and link them (with ID caching)
         entity_texts = []
         for etype, evalue, erole in item.get("entities", []):
             if not evalue or not evalue.strip():
@@ -507,34 +672,39 @@ def _index_impl(connector, tool_name, result, args, account_id):
             normalized = evalue.strip().lower()
             entity_texts.append(evalue)
 
-            db.execute(
-                "INSERT OR IGNORE INTO entities (type, value, normalized) VALUES (?, ?, ?)",
-                (etype, evalue.strip(), normalized),
-            )
-            entity_id = db.execute(
-                "SELECT id FROM entities WHERE type=? AND normalized=?",
-                (etype, normalized),
-            ).fetchone()[0]
+            cache_key = (etype, normalized)
+            entity_id = _entity_id_cache.get(cache_key)
+            if entity_id is None:
+                db.execute(
+                    "INSERT OR IGNORE INTO entities (type, value, normalized) VALUES (?, ?, ?)",
+                    (etype, evalue.strip(), normalized),
+                )
+                entity_id = db.execute(
+                    "SELECT id FROM entities WHERE type=? AND normalized=?",
+                    (etype, normalized),
+                ).fetchone()[0]
+                _entity_id_cache[cache_key] = entity_id
 
             db.execute(
                 "INSERT OR IGNORE INTO item_entities (item_id, entity_id, role) VALUES (?, ?, ?)",
                 (item_id, entity_id, erole),
             )
 
-        # Update FTS index
+        # Update FTS index (delete with OLD values, insert with NEW)
+        new_title = item.get("title", "")
+        new_snippet = item.get("snippet", "")
         entity_text = " ".join(entity_texts)
         try:
-            # Delete old FTS entry
             db.execute(
                 "INSERT INTO knowledge_fts(knowledge_fts, rowid, title, snippet, entity_text) VALUES('delete', ?, ?, ?, ?)",
-                (item_id, item.get("title", ""), item.get("snippet", ""), ""),
+                (item_id, old_title, old_snippet, old_entity_text),
             )
         except Exception:
             pass
         try:
             db.execute(
                 "INSERT INTO knowledge_fts(rowid, title, snippet, entity_text) VALUES (?, ?, ?, ?)",
-                (item_id, item.get("title", ""), item.get("snippet", ""), entity_text),
+                (item_id, new_title, new_snippet, entity_text),
             )
         except Exception:
             pass
@@ -574,8 +744,11 @@ KNOWLEDGE_TOOL_DEF = {
 }
 
 
-def search(query, connector=None, max_results=10):
+def search(query, connector=None, max_results=None):
     """Search the knowledge base. Returns JSON string for the LLM."""
+    if max_results is None:
+        max_results = _get_config("default_max_results", 10)
+
     db = _get_db()
     results = []
     seen_ids = set()
@@ -667,6 +840,233 @@ def _fts5_escape(query):
     if not words:
         return '""'
     return " OR ".join(f'"{w}"' for w in words)
+
+
+# ── Proactive Surfacing ───────────────────────────────────────────
+
+_summary_cache = {"text": None, "ts": 0}
+
+
+def get_summary():
+    """Return a compact summary of knowledge base contents for system prompt.
+
+    Returns top people, repos, and topics. Cached for configurable TTL.
+    Returns None if the KB is empty.
+    """
+    import time
+    now = time.time()
+    cache_ttl = _get_config("summary_cache_ttl", 300)
+    if _summary_cache["text"] is not None and (now - _summary_cache["ts"]) < cache_ttl:
+        return _summary_cache["text"]
+
+    try:
+        db = _get_db()
+
+        # Top people (by mention count, exclude raw emails)
+        people = db.execute("""
+            SELECT e.value, COUNT(*) as cnt FROM entities e
+            JOIN item_entities ie ON e.id = ie.entity_id
+            WHERE e.type = 'person' AND e.value NOT LIKE '%@%'
+            GROUP BY e.normalized ORDER BY cnt DESC LIMIT 10
+        """).fetchall()
+
+        # Top repos
+        repos = db.execute("""
+            SELECT e.value, COUNT(*) as cnt FROM entities e
+            JOIN item_entities ie ON e.id = ie.entity_id
+            WHERE e.type = 'repo'
+            GROUP BY e.normalized ORDER BY cnt DESC LIMIT 5
+        """).fetchall()
+
+        # Top topics
+        topics = db.execute("""
+            SELECT e.value, COUNT(*) as cnt FROM entities e
+            JOIN item_entities ie ON e.id = ie.entity_id
+            WHERE e.type = 'topic'
+            GROUP BY e.normalized ORDER BY cnt DESC LIMIT 5
+        """).fetchall()
+
+        # Total item count
+        total = db.execute("SELECT COUNT(*) FROM knowledge_items").fetchone()[0]
+
+        if total == 0:
+            _summary_cache["text"] = None
+            _summary_cache["ts"] = now
+            return None
+
+        parts = [f"Knowledge base: {total} items indexed."]
+        if people:
+            parts.append("Known people: " + ", ".join(f"{p[0]} ({p[1]})" for p in people))
+        if repos:
+            parts.append("Active repos: " + ", ".join(r[0] for r in repos))
+        if topics:
+            parts.append("Recent topics: " + ", ".join(t[0] for t in topics))
+
+        result = " | ".join(parts)
+        _summary_cache["text"] = result
+        _summary_cache["ts"] = now
+        return result
+
+    except Exception:
+        return None
+
+
+# Common English words to skip when extracting names from messages (default set)
+_BASE_COMMON_WORDS = {
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+    "her", "was", "one", "our", "out", "has", "his", "how", "its", "let",
+    "may", "new", "now", "old", "see", "way", "who", "did", "get", "got",
+    "him", "hit", "just", "like", "make", "many", "some", "time", "very",
+    "when", "come", "made", "find", "here", "know", "take", "want", "does",
+    "been", "call", "each", "from", "have", "keep", "last", "long", "much",
+    "than", "them", "then", "this", "what", "will", "with", "about", "could",
+    "still", "their", "there", "these", "thing", "think", "those", "would",
+    "after", "first", "where", "which", "while", "being", "every", "never",
+    "other", "right", "since", "under", "using", "could", "email", "check",
+    "send", "reply", "read", "show", "tell", "help", "look", "need", "also",
+    "please", "thanks", "hey", "what's", "whats", "sure", "yeah", "okay",
+    "yes", "any", "should", "doing", "going", "update", "give", "info",
+    "I", "I'm", "I've", "I'll", "My", "We", "They", "He", "She", "It",
+    "That", "This", "What", "When", "Where", "How", "Why", "Who",
+}
+
+# Pre-computed lowercase set (avoids rebuilding per word per message)
+_BASE_COMMON_WORDS_LOWER = {w.lower() for w in _BASE_COMMON_WORDS}
+
+
+def _extract_message_entities(message):
+    """Extract potential entity names from a user message for proactive search.
+
+    Looks for: capitalized words (potential names), known topic keywords,
+    and @mentions.
+    """
+    if not message or len(message) < 3:
+        return []
+
+    entity_limit = _get_config("entity_extract_limit", 8)
+    entities = set()
+
+    # Known topic keywords
+    for topic in _extract_topics(message):
+        entities.add(topic)
+
+    # @mentions
+    for match in re.finditer(r'@(\w+)', message):
+        entities.add(match.group(1))
+
+    # Capitalized words that might be names (2+ chars, not at sentence start)
+    words = message.split()
+    for i, word in enumerate(words):
+        clean = re.sub(r'[^\w]', '', word)
+        if not clean or len(clean) < 2:
+            continue
+        # Skip common words
+        if clean.lower() in _BASE_COMMON_WORDS_LOWER:
+            continue
+        # Capitalized word not at sentence start
+        if clean[0].isupper() and (i > 0 or len(clean) > 2):
+            # Skip ALL-CAPS short words (acronyms like "PR", "API" — handled by topics)
+            if clean.isupper() and len(clean) <= 3:
+                continue
+            entities.add(clean)
+
+    return list(entities)[:entity_limit]
+
+
+def quick_search(message):
+    """Proactive knowledge search based on a user message.
+
+    Extracts entities/topics from the message, searches the KB for each,
+    deduplicates, and returns a compact context string.
+    Returns None if nothing relevant is found.
+    """
+    entities = _extract_message_entities(message)
+    if not entities:
+        return None
+
+    db = _get_db()
+    # Quick check: is there any data at all?
+    try:
+        count = db.execute("SELECT COUNT(*) FROM knowledge_items").fetchone()[0]
+        if count == 0:
+            return None
+    except Exception:
+        return None
+
+    config = _load_config()
+    max_results = config.get("quick_search_max_results", 5)
+    title_len = config.get("title_display_length", 80)
+    snippet_len = config.get("snippet_display_length", 100)
+
+    results = []
+    seen_ids = set()
+
+    # Batch FTS: combine all entities into one OR query (1 query instead of N)
+    try:
+        fts_terms = []
+        for entity in entities:
+            words = [w.strip() for w in entity.strip().split() if w.strip()]
+            fts_terms.extend(f'"{w}"' for w in words)
+        if fts_terms:
+            fts_query = " OR ".join(fts_terms)
+            rows = db.execute("""
+                SELECT ki.id, ki.connector, ki.tool_name, ki.source_id, ki.event_date,
+                       ki.title, ki.snippet, ki.metadata, ki.account_id
+                FROM knowledge_fts
+                JOIN knowledge_items ki ON knowledge_fts.rowid = ki.id
+                WHERE knowledge_fts MATCH ?
+                ORDER BY rank LIMIT ?
+            """, (fts_query, max_results * 2)).fetchall()
+            for row in rows:
+                if row[0] not in seen_ids:
+                    seen_ids.add(row[0])
+                    results.append(_format_row(row))
+    except Exception:
+        pass
+
+    # Batch entity match: combine into one query with OR (1 query instead of N)
+    if len(results) < max_results:
+        try:
+            like_clauses = " OR ".join("e.normalized LIKE ?" for _ in entities)
+            like_params = [f"%{e.lower().strip()}%" for e in entities]
+            rows = db.execute(f"""
+                SELECT DISTINCT ki.id, ki.connector, ki.tool_name, ki.source_id, ki.event_date,
+                       ki.title, ki.snippet, ki.metadata, ki.account_id
+                FROM entities e
+                JOIN item_entities ie ON e.id = ie.entity_id
+                JOIN knowledge_items ki ON ie.item_id = ki.id
+                WHERE {like_clauses}
+                ORDER BY ki.event_date DESC LIMIT ?
+            """, like_params + [max_results * 2]).fetchall()
+            for row in rows:
+                if row[0] not in seen_ids:
+                    seen_ids.add(row[0])
+                    results.append(_format_row(row))
+        except Exception:
+            pass
+
+    if not results:
+        return None
+
+    # Sort by date, take top N results
+    results.sort(key=lambda r: r.get("date", ""), reverse=True)
+    results = results[:max_results]
+
+    # Format as compact context string
+    lines = []
+    for r in results:
+        source = r["connector"].replace("_", " ").title()
+        date = r["date"][:10] if r["date"] else ""
+        title = r["title"][:title_len] if r["title"] else ""
+        snippet = r["snippet"][:snippet_len] if r["snippet"] else ""
+        line = f"- [{source}] {title}"
+        if date:
+            line += f" ({date})"
+        if snippet and snippet != title:
+            line += f": {snippet}"
+        lines.append(line)
+
+    return "\n".join(lines)
 
 
 def clear():
