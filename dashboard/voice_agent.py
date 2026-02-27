@@ -38,30 +38,21 @@ from agent_shared import (
 setup_env()
 
 
-# Voice-appropriate tools — keeps the Live API under its tool limit
-# Excludes advanced/destructive GitHub ops that don't make sense in voice
+# Voice-appropriate tools — kept minimal for Gemini Live API stability.
+# Each tool declaration adds to the session config size.
 VOICE_TOOL_WHITELIST = {
-    # Gmail essentials
-    "gmail_get_unread", "gmail_search", "gmail_read_email", "gmail_send", "gmail_reply",
-    "gmail_mark_read", "gmail_trash",
-    # Work email essentials
+    # Email (read + reply + forward — the voice essentials)
+    "gmail_get_unread", "gmail_search", "gmail_read_email",
+    "gmail_send", "gmail_reply", "gmail_forward",
     "work_email_get_unread", "work_email_search", "work_email_read_email",
-    "work_email_send", "work_email_reply", "work_email_mark_read",
-    # GitHub — high-level only
-    "github_notifications", "github_list_repos", "github_search",
-    "github_list_prs", "github_get_pr", "github_list_issues", "github_get_issue",
-    "github_create_issue", "github_get_me",
-    # Yahoo Finance
-    "yahoo_finance_quote", "yahoo_finance_search",
-    # Telegram
+    "work_email_send", "work_email_reply", "work_email_forward",
+    # GitHub (read-only summaries)
+    "github_notifications", "github_list_prs", "github_get_pr",
+    "github_list_issues", "github_get_issue",
+    # Quick lookups
+    "yahoo_finance_quote",
     "telegram_get_updates", "telegram_send_message",
-    # WhatsApp
-    "whatsapp_send_message",
-    # Firebase
-    "firebase_list_collections", "firebase_query",
-    # Supabase
-    "supabase_query",
-    # Knowledge base
+    # Knowledge
     "search_knowledge",
 }
 
@@ -114,65 +105,42 @@ BRIEFING_TOOL_DEF = {
 
 
 def build_system_prompt(connectors):
-    """Build a concise voice-appropriate system prompt."""
-    connectors_dir = PROJECT_ROOT / "connectors"
+    """Build a lean voice-appropriate system prompt.
 
+    IMPORTANT: Keep this small — Gemini Live counts system instructions + tool
+    definitions toward context. Tool descriptions are already in function
+    declarations, so we do NOT load connector instructions.md files here.
+    """
     lines = [
-        "You are ClawFounder — a sharp, proactive project manager who knows everything about "
-        "the user's work. You take real actions using connected services. You are speaking "
-        "to the user via voice — be punchy, direct, and useful.",
+        "You are ClawFounder, a predictive PM speaking via voice. Be punchy — 2-3 sentences max.",
         "",
-        "## Voice Behavior",
-        "- Keep responses SHORT and conversational — 2-3 sentences max. You are speaking, not writing.",
-        "- Don't use markdown, bullet points, or formatting — just speak naturally.",
-        "- When using tools, briefly say what you're doing (e.g., 'Checking your emails now...' or 'Let me look that up...').",
-        "- For read-only actions, just do them. For actions that send/modify/delete, confirm first.",
-        "- Summarize results verbally — don't read out raw data. Give the highlights.",
-        "- After completing a task, suggest a natural next step. For example: after reading emails, say 'Want me to reply to any of these?'",
-        "",
-        "## Proactive Behavior",
-        "- When the user asks for a summary, briefing, or 'what's going on', use the get_briefing tool.",
-        "- When the user mentions a person, project, or topic, use search_knowledge FIRST to check for relevant context.",
-        "- If the user mentions being blocked, frustrated, or waiting on something, proactively search your knowledge to see if you can help unblock them.",
-        "- Connect dots across services — if an email mentions a PR, and the user asks about that PR, mention the email context too.",
-        "",
-        "## Error Recovery",
-        "- If a tool fails, say something natural like 'I couldn't reach GitHub right now' and offer to check what you know from earlier.",
-        "- Never go silent — always give a verbal response, even if it's 'I ran into an issue, let me try another way.'",
-        "",
+        "How you work:",
+        "- React to what you see. Email needs reply? Draft it: 'I'd say [draft]. Send it?'",
+        "- Cross-reference everything. Email asks about X? Check GitHub/knowledge first.",
+        "- Propose actions, let the user approve or deny. Minimize user thinking.",
+        "- Read-only actions: just do them. Send/modify/delete: confirm first.",
+        "- If a tool fails, say so naturally and check knowledge base for context.",
+        "- Speak naturally — no markdown, no bullet points, no formatting.",
     ]
 
-    if connectors:
-        lines.append("## Connected Services")
-        lines.append("")
-        for conn_name in sorted(connectors.keys()):
-            instructions_file = connectors_dir / conn_name / "instructions.md"
-            if instructions_file.exists():
-                try:
-                    content = instructions_file.read_text().strip()
-                    lines.append(f"### {conn_name}")
-                    lines.append(content)
-                    lines.append("")
-                except Exception:
-                    pass
+    # List connected services and accounts (compact, no full instruction files)
+    service_parts = []
+    for conn_name in sorted(connectors.keys()):
+        info = connectors[conn_name]
+        accounts = info.get("accounts", []) if isinstance(info, dict) else []
+        if len(accounts) > 1:
+            labels = ", ".join(a.get("label", a["id"]) for a in accounts)
+            service_parts.append(f"{conn_name} ({labels})")
+        else:
+            service_parts.append(conn_name)
+    if service_parts:
+        lines.append(f"\nConnected: {', '.join(service_parts)}.")
 
-            info = connectors[conn_name]
-            accounts = info.get("accounts", []) if isinstance(info, dict) else []
-            if len(accounts) > 1:
-                lines.append(f"#### {conn_name} — Accounts")
-                for acct in accounts:
-                    lines.append(f"- `{acct['id']}`: {acct.get('label', acct['id'])}")
-                lines.append("")
-
-    # Add knowledge base summary (what the agent already knows)
     try:
         import knowledge_base
         kb_summary = knowledge_base.get_summary()
         if kb_summary:
-            lines.append("## Memory")
-            lines.append(f"You have context from past interactions. {kb_summary}")
-            lines.append("Use search_knowledge to look up details about any person or topic.")
-            lines.append("")
+            lines.append(f"Memory: {kb_summary}")
     except Exception:
         pass
 
@@ -181,7 +149,7 @@ def build_system_prompt(connectors):
 
 # ── Gemini Live API session ──────────────────────────────────────
 
-LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-live-2.5-flash-native-audio")
+LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
 
 
 def _log(msg):
@@ -277,8 +245,17 @@ async def _run_live_session(client, config, loop, tool_map, connectors):
             """Read audio from stdin, forward to Gemini Live."""
             while not stop_event.is_set():
                 try:
-                    line = await loop.run_in_executor(None, sys.stdin.readline)
+                    # Use timeout so we can check stop_event periodically
+                    # (stdin.readline blocks in executor and can't be cancelled)
+                    try:
+                        line = await asyncio.wait_for(
+                            loop.run_in_executor(None, sys.stdin.readline),
+                            timeout=2.0,
+                        )
+                    except asyncio.TimeoutError:
+                        continue  # Check stop_event and loop
                     if not line:
+                        _log("stdin EOF — ending send_audio")
                         stop_event.set()
                         break
                     msg = json.loads(line)
@@ -291,20 +268,25 @@ async def _run_live_session(client, config, loop, tool_map, connectors):
                             )
                         )
                     elif msg["type"] == "end":
+                        _log("Received end message — stopping")
                         stop_event.set()
                         break
                 except json.JSONDecodeError:
                     continue
                 except Exception as e:
+                    _log(f"Send error: {e}")
                     emit({"type": "error", "error": f"Send error: {e}"})
                     stop_event.set()
                     break
 
         async def receive_responses():
             """Read Gemini Live responses, forward to stdout."""
+            _log("receive_responses started")
             while not stop_event.is_set():
                 try:
+                    response_count = 0
                     async for response in session.receive():
+                        response_count += 1
                         if stop_event.is_set():
                             break
 
@@ -408,17 +390,28 @@ async def _run_live_session(client, config, loop, tool_map, connectors):
                                     ]
                                 )
 
+                    # Iterator completed — Gemini closed the session
+                    _log(f"session.receive() ended after {response_count} responses")
+                    stop_event.set()
+                    break
+
                 except Exception as e:
                     if not stop_event.is_set():
+                        _log(f"Receive error: {e}")
                         emit({"type": "error", "error": f"Receive error: {e}"})
+                    stop_event.set()
                     break
 
         # Run send and receive concurrently
-        await asyncio.gather(
+        results = await asyncio.gather(
             send_audio(),
             receive_responses(),
             return_exceptions=True,
         )
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                _log(f"Task {i} raised: {r}")
+        _log("Session ended — both tasks complete")
 
 
 if __name__ == "__main__":

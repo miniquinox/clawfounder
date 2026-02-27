@@ -23,6 +23,7 @@ This is only needed once by a Workspace admin. Personal @gmail.com accounts do n
 | `work_email_read_email` | Read full email body by message ID |
 | `work_email_send` | Compose and send a new email |
 | `work_email_reply` | Reply to an existing email thread (maintains conversation) |
+| `work_email_forward` | Forward a work email to a new recipient (includes original body) |
 | `work_email_create_draft` | Create a draft email (saved but NOT sent) |
 | `work_email_trash` | Move an email to the trash |
 | `work_email_mark_read` | Mark emails as read (supports multiple IDs) |
@@ -58,6 +59,7 @@ Use `work_email_search` with these queries (same syntax as the Gmail search bar)
 
 - **"Read my latest work email from the CEO"** → `work_email_search` with `from:ceo` max_results=1, then `work_email_read_email`
 - **"Reply to that email"** → `work_email_reply` with the message_id and reply body
+- **"Forward that email to the team lead"** → `work_email_forward` with the message_id and recipient
 - **"Draft a follow-up to the client"** → `work_email_search` to find it, then `work_email_create_draft`
 - **"Mark all meeting emails as read"** → `work_email_search` for them, then `work_email_mark_read`
 - **"Star that important email"** → `work_email_toggle_star` with the message_id

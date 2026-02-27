@@ -193,39 +193,15 @@ def gather_data(connectors, connector_configs=None):
 
 # ── Phase 2: LLM analysis ────────────────────────────────────────
 
-BRIEFING_SYSTEM_PROMPT = """You are generating a daily briefing for the user. You will receive raw data from their connected services (email, GitHub, messaging, finance, etc.).
+BRIEFING_SYSTEM_PROMPT = """Generate a briefing from the user's connected services. Return ONLY a valid JSON array of tasks.
 
-Analyze it and return ONLY a valid JSON array of tasks. Each task must have:
-- "id": unique string (e.g. "task_1", "task_2")
-- "source": connector name (e.g. "gmail", "github", "telegram", "yahoo_finance")
-- "priority": "high", "medium", or "low"
-- "title": short actionable title (under 80 chars)
-- "summary": 1-2 sentences of context
-- "suggested_action": primary action (a natural language instruction for chat)
-- "follow_ups": array of 2-3 specific follow-up actions the user might want. Each is an object with "label" (short button text, 2-4 words) and "prompt" (the chat message to send).
+Each task: {"id": "task_1", "source": "gmail", "priority": "high|medium|low", "title": "<80 chars", "summary": "1-2 sentences", "suggested_action": "natural language instruction", "follow_ups": [{"label": "2-4 words", "prompt": "chat message"}], "connections": ["Related to PR #42 (merged)"]}
 
-Follow-up guidelines per connector:
-- gmail/work_email: ["Reply to this", "Mark as read", "Archive it"] or ["Draft a reply", "Forward to team", "Snooze for later"]
-- github: ["Review the PR", "Check CI status", "View the diff"] or ["Merge it", "Request changes", "View repo"]
-- telegram/whatsapp: ["Reply to them", "Mark as read"] or ["Draft a response", "Ignore"]
-- yahoo_finance: ["Show price history", "Analyze this stock", "Compare with sector"] or ["Show 1-month chart data", "Get detailed financials", "Check news about {company}"]
-- supabase/firebase: ["Show recent rows", "Run query", "Check logs"]
+Priority: HIGH = needs reply, failing CI, PR review, >5% stock move. MEDIUM = FYI, open PRs, 2-5% moves. LOW = newsletters, routine.
 
-Make follow-ups SPECIFIC to the actual item. For example:
-- For META stock: [{"label": "META history", "prompt": "Show me META price history for the last month"}, {"label": "Analyze META", "prompt": "Analyze META stock performance and give me your take"}, {"label": "Tech sector", "prompt": "How is META performing compared to other tech stocks?"}]
-- For a PR: [{"label": "Review PR", "prompt": "Show me the changes in PR #42 on owner/repo"}, {"label": "CI status", "prompt": "Check the CI status for PR #42 on owner/repo"}]
-- For an email: [{"label": "Draft reply", "prompt": "Draft a reply to the email from John about the project update"}, {"label": "Summarize thread", "prompt": "Summarize the full email thread from John"}]
+Be selective: skip newsletters/automated/marketing. Quality over quantity. Make follow-ups specific to the actual item.
 
-Priority guidelines:
-- HIGH: Urgent emails needing reply, failing CI, PR review requests, direct messages, stocks with >5% daily change
-- MEDIUM: FYI emails, open PRs to check, notification digests, notable stock movements (2-5%)
-- LOW: Newsletters, automated notifications, non-urgent updates, routine stock updates
-
-For email data (gmail, work_email): Be selective. Only create tasks for emails that genuinely require action — direct messages needing a reply, important requests, or time-sensitive items. Skip newsletters, marketing emails, automated notifications, social media alerts, and FYI-only emails entirely. Group any remaining low-priority emails into a single summary item if needed. Quality over quantity.
-
-For yahoo_finance data: Report notable movers with price, change %, and significant movements relative to 52-week range. Group minor movements into a single low-priority summary item rather than listing each stock separately.
-
-For github data: Highlight PRs awaiting your review, failing checks, and direct mentions. Group routine notifications into summary items.
+CROSS-REFERENCE: When an email relates to a GitHub PR/issue, or a person appears across services, add "connections" linking them. Flag conflicting deadlines as HIGH.
 
 Sort by priority (high first), then by recency. Max 15 tasks.
 Return ONLY the JSON array. No markdown, no explanation, no code fences."""

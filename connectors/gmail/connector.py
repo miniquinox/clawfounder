@@ -206,6 +206,28 @@ TOOLS = [
         },
     },
     {
+        "name": "gmail_forward",
+        "description": "Forward an email to a new recipient. Includes the original message body below an optional note.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "message_id": {
+                    "type": "string",
+                    "description": "The message ID to forward (from gmail_search or gmail_get_unread)",
+                },
+                "to": {
+                    "type": "string",
+                    "description": "Recipient email address to forward to",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Optional note to include above the forwarded content (can be empty)",
+                },
+            },
+            "required": ["message_id", "to"],
+        },
+    },
+    {
         "name": "gmail_list_labels",
         "description": "List all labels (folders/categories) in the user's Gmail. Returns label names and IDs.",
         "parameters": {
@@ -447,6 +469,36 @@ def _reply(message_id: str, body: str, account_id=None) -> str:
     return f"Reply sent to {reply_msg['to']} in thread: {headers.get('Subject', '')}"
 
 
+def _forward(message_id: str, to: str, body: str = "", account_id=None) -> str:
+    service = _get_gmail_service(account_id)
+    # Fetch the original message with full body
+    original = service.users().messages().get(
+        userId="me", id=message_id, format="full"
+    ).execute()
+    headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
+    original_body = _extract_body(original.get("payload", {}))
+
+    # Build forwarded content
+    fwd_block = (
+        "\n\n---------- Forwarded message ----------\n"
+        f"From: {headers.get('From', 'Unknown')}\n"
+        f"Date: {headers.get('Date', 'Unknown')}\n"
+        f"Subject: {headers.get('Subject', '(no subject)')}\n"
+        f"To: {headers.get('To', 'Unknown')}\n\n"
+        f"{original_body[:4000]}"
+    )
+    full_body = (body + fwd_block) if body else fwd_block.lstrip("\n")
+
+    subject = "Fwd: " + headers.get("Subject", "").removeprefix("Fwd: ")
+
+    message = MIMEText(full_body)
+    message["to"] = to
+    message["subject"] = subject
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    service.users().messages().send(userId="me", body={"raw": raw}).execute()
+    return f"Email forwarded to {to} — Subject: {subject}"
+
+
 def _create_draft(to: str, subject: str, body: str, account_id=None) -> str:
     service = _get_gmail_service(account_id)
     message = MIMEText(body)
@@ -523,6 +575,8 @@ def handle(tool_name: str, args: dict, account_id: str = None) -> str:
             return _send(args["to"], args["subject"], args["body"], account_id=account_id)
         elif tool_name == "gmail_reply":
             return _reply(args["message_id"], args["body"], account_id=account_id)
+        elif tool_name == "gmail_forward":
+            return _forward(args["message_id"], args["to"], args.get("body", ""), account_id=account_id)
         elif tool_name == "gmail_create_draft":
             return _create_draft(args["to"], args["subject"], args["body"], account_id=account_id)
         elif tool_name == "gmail_trash":

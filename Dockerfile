@@ -39,12 +39,15 @@ RUN cd dashboard && npm ci --omit=dev
 
 # Application code
 COPY agent/ ./agent/
-COPY dashboard/server.js dashboard/chat_agent.py dashboard/briefing_agent.py dashboard/voice_agent.py ./dashboard/
+COPY dashboard/server.js dashboard/chat_agent.py dashboard/briefing_agent.py dashboard/voice_agent.py \
+     dashboard/agent_shared.py dashboard/tool_cache.py dashboard/tool_router.py dashboard/knowledge_base.py \
+     ./dashboard/
 
 # Copy built frontend from stage 1
 COPY --from=frontend-build /app/dashboard/dist ./dashboard/dist
 
 ENV NODE_ENV=production
+ENV PORT=8080
 EXPOSE 8080
 
 CMD ["node", "dashboard/server.js"]

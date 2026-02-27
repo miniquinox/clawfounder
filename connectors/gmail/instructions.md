@@ -23,6 +23,7 @@ This is only needed once. After that, just click "Sign in with Google".
 | `gmail_read_email` | Read full email body by message ID |
 | `gmail_send` | Compose and send a new email |
 | `gmail_reply` | Reply to an existing email thread (maintains conversation) |
+| `gmail_forward` | Forward an email to a new recipient (includes original body) |
 | `gmail_create_draft` | Create a draft email (saved but NOT sent) |
 | `gmail_trash` | Move an email to the trash |
 | `gmail_mark_read` | Mark emails as read (supports multiple IDs) |
@@ -58,6 +59,7 @@ Use `gmail_search` with these queries (same syntax as the Gmail search bar):
 
 - **"Read my latest email from John"** → `gmail_search` with `from:john` max_results=1, then `gmail_read_email`
 - **"Reply to that email"** → `gmail_reply` with the message_id and reply body
+- **"Forward that email to Sarah"** → `gmail_forward` with the message_id and recipient
 - **"Draft a follow-up to the meeting email"** → `gmail_search` to find it, then `gmail_create_draft`
 - **"Mark all emails from newsletters as read"** → `gmail_search` for them, then `gmail_mark_read`
 - **"Star that important email"** → `gmail_toggle_star` with the message_id

@@ -1447,9 +1447,9 @@ if (fs.existsSync(DIST_DIR)) {
 
 // ── Start ───────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
     ensureAccountsRegistry();
-    console.log(`🦀 ClawFounder API running on http://localhost:${PORT}`);
+    console.log(`🦀 ClawFounder API running on http://0.0.0.0:${PORT}`);
 });
 
 // ── Voice WebSocket (Gemini Live API bridge) ────────────────────
