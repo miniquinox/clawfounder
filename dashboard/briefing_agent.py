@@ -102,6 +102,7 @@ _CACHEABLE_PREFIXES = (
 
 def _call_tool(module, tool_name, args, accounts):
     import tool_cache
+    import knowledge_base
 
     account_id = args.pop("account", None)
     if account_id is None and len(accounts) == 1:
@@ -111,6 +112,7 @@ def _call_tool(module, tool_name, args, accounts):
     if tool_name in _CACHEABLE_PREFIXES:
         cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
         if cached is not None:
+            knowledge_base.index(connector, tool_name, cached, args, account_id)
             return cached
 
     supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
@@ -121,6 +123,9 @@ def _call_tool(module, tool_name, args, accounts):
 
     if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
         tool_cache.put(tool_name, args, result, account_id=account_id)
+
+    if isinstance(result, str):
+        knowledge_base.index(connector, tool_name, result, args, account_id)
 
     return result
 

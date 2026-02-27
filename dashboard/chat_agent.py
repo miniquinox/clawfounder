@@ -35,6 +35,11 @@ def emit(event):
     print(json.dumps(event, default=str), flush=True)
 
 
+def _log(msg):
+    """Log to stderr (visible in server.js but not in JSONL stdout)."""
+    print(f"[chat] {msg}", file=sys.stderr, flush=True)
+
+
 # ── Load connectors ─────────────────────────────────────────────
 
 def _read_accounts_registry():
@@ -101,11 +106,14 @@ def load_all_connectors():
     return loaded
 
 
-def build_tools_and_map(connectors):
+def build_tools_and_map(connectors, allowed_tools=None):
     """Build tool definitions and a routing map from loaded connectors.
 
     When a connector has multiple enabled accounts and supports multi-account,
     inject an `account` parameter into each tool's parameters.
+
+    If allowed_tools is provided (a set of tool name strings), only include
+    tools whose name is in the set.
 
     Returns (all_tools, tool_map) where:
       all_tools = list of tool definition dicts
@@ -120,6 +128,9 @@ def build_tools_and_map(connectors):
         supports_multi = info["supports_multi"]
 
         for tool in module.TOOLS:
+            if allowed_tools and tool["name"] not in allowed_tools:
+                continue
+
             if supports_multi and len(accounts) > 1:
                 # Deep copy and inject `account` parameter
                 tool_def = copy.deepcopy(tool)
@@ -213,11 +224,13 @@ def build_system_prompt(connectors):
         "## Rules",
         "1. ALWAYS use tools to answer questions — never guess or say you can't when a tool exists.",
         "2. When the user asks for a summary, briefing, or 'what's going on', use the get_briefing tool.",
-        "3. When the user asks about emails, files, data, etc. — call the appropriate tool FIRST, then answer.",
-        "4. If a tool returns an error, report it honestly and suggest next steps.",
-        "5. Be brief. Don't narrate every step — just do it.",
-        "6. If multiple email accounts are connected, search ALL of them when looking something up.",
-        "7. When the user mentions a person by name, search your emails to find their address. "
+        "3. When the user mentions a person, project, or topic, use search_knowledge FIRST to check for "
+        "relevant context across all services before making direct tool calls.",
+        "4. When the user asks about emails, files, data, etc. — call the appropriate tool FIRST, then answer.",
+        "5. If a tool returns an error, report it honestly and suggest next steps.",
+        "6. Be brief. Don't narrate every step — just do it.",
+        "7. If multiple email accounts are connected, search ALL of them when looking something up.",
+        "8. When the user mentions a person by name, search your emails to find their address. "
         "The search results include `to` and `from` fields — use those.",
         "",
         "## Email Persona — CRITICAL",
@@ -303,8 +316,9 @@ _CACHEABLE_PREFIXES = (
 
 
 def _call_tool(module, tool_name, args, accounts):
-    """Call a connector's handle() with optional account_id routing + caching."""
+    """Call a connector's handle() with optional account_id routing + caching + knowledge indexing."""
     import tool_cache
+    import knowledge_base
 
     account_id = args.pop("account", None)
     # Auto-select if only 1 account
@@ -316,6 +330,7 @@ def _call_tool(module, tool_name, args, accounts):
     if tool_name in _CACHEABLE_PREFIXES:
         cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
         if cached is not None:
+            knowledge_base.index(connector, tool_name, cached, args, account_id)
             return cached
 
     supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
@@ -327,6 +342,10 @@ def _call_tool(module, tool_name, args, accounts):
     # Cache the result for read-only tools
     if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
         tool_cache.put(tool_name, args, result, account_id=account_id)
+
+    # Index into knowledge base (fire-and-forget)
+    if isinstance(result, str):
+        knowledge_base.index(connector, tool_name, result, args, account_id)
 
     return result
 
@@ -372,43 +391,7 @@ def _get_briefing(connectors):
     return "\n\n".join(parts) if parts else "No data available from connected services."
 
 
-# ── Tool router ──────────────────────────────────────────────────
-
-def route_tools(message, connectors, provider="gemini"):
-    """Use a fast model call to pick which connectors are relevant to the user's message.
-    Returns a filtered connectors dict with only the relevant ones."""
-    if len(connectors) <= 2:
-        return connectors  # Not worth routing for 1-2 connectors
-
-    available = sorted(connectors.keys())
-
-    # Quick keyword check first — avoids an API call for obvious cases
-    msg_lower = message.lower()
-    keyword_map = {
-        "gmail": ["email", "mail", "inbox", "unread", "gmail", "send", "draft", "reply"],
-        "work_email": ["work email", "work mail", "work inbox", "office email"],
-        "github": ["github", "repo", "pr", "pull request", "issue", "commit", "branch", "merge", "ci", "workflow", "notification"],
-        "yahoo_finance": ["stock", "price", "ticker", "market", "finance", "portfolio", "shares", "nasdaq", "s&p"],
-        "telegram": ["telegram", "tg", "message"],
-        "whatsapp": ["whatsapp", "wa"],
-        "firebase": ["firebase", "firestore", "collection", "document"],
-        "supabase": ["supabase", "database", "table", "query", "row"],
-    }
-
-    # Check for briefing/summary keywords — return all connectors
-    if any(kw in msg_lower for kw in ["briefing", "summary", "what's going on", "whats going on", "update me", "catch me up"]):
-        return connectors
-
-    matched = set()
-    for conn, keywords in keyword_map.items():
-        if conn in available and any(kw in msg_lower for kw in keywords):
-            matched.add(conn)
-
-    if matched:
-        return {k: v for k, v in connectors.items() if k in matched}
-
-    # No keyword match — return all (let the model figure it out)
-    return connectors
+# ── Tool router (LLM-powered) ────────────────────────────────────
 
 
 # ── Provider: Gemini ─────────────────────────────────────────────
@@ -427,15 +410,20 @@ def run_gemini(message, history, connectors):
 
     client = genai.Client(api_key=api_key)
 
-    # Route to relevant connectors only
-    routed = route_tools(message, connectors)
-    if set(routed.keys()) != set(connectors.keys()):
-        emit({"type": "thinking", "text": f"Routing to: {', '.join(sorted(routed.keys()))}"})
+    # Smart tool routing — LLM picks relevant tools
+    import tool_router
+    allowed_tools = tool_router.route(message, connectors, api_key)
+    if allowed_tools:
+        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
 
-    # Build tool declarations from connectors + briefing
-    all_tool_defs, tool_map = build_tools_and_map(routed)
+    # Build tool declarations from connectors + briefing + knowledge
+    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
     all_tool_defs.append(BRIEFING_TOOL_DEF)
     tool_map["get_briefing"] = ("_briefing", None, [])
+
+    import knowledge_base
+    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
+    tool_map["search_knowledge"] = ("_knowledge", None, [])
 
     gemini_fns = []
     for tool in all_tool_defs:
@@ -470,29 +458,41 @@ def run_gemini(message, history, connectors):
         max_output_tokens=8192,
     )
 
+    # Set thinking budget if supported (prevents thinking-only responses)
+    try:
+        config.thinking_config = types.ThinkingConfig(thinking_budget=2048)
+    except Exception:
+        pass
+
     # Agentic loop with streaming
     max_turns = 10
+    thinking_retries = 0
     for turn in range(max_turns):
         try:
             streamed_text = ""
             function_calls = []
             had_thinking = False
 
+            chunk_count = 0
             for chunk in client.models.generate_content_stream(
                 model=GEMINI_MODEL,
                 contents=contents,
                 config=config,
             ):
+                chunk_count += 1
                 if not chunk.candidates:
+                    _log(f"Chunk {chunk_count}: no candidates")
                     continue
                 candidate = chunk.candidates[0]
+                finish = getattr(candidate, 'finish_reason', None)
                 # Check for blocked / safety-filtered responses
-                if hasattr(candidate, 'finish_reason') and candidate.finish_reason and \
-                   str(candidate.finish_reason) not in ('STOP', 'MAX_TOKENS', 'FinishReason.STOP', 'FinishReason.MAX_TOKENS', '0', '1'):
-                    emit({"type": "error", "error": f"Response blocked: {candidate.finish_reason}"})
+                if finish and str(finish) not in ('STOP', 'MAX_TOKENS', 'FinishReason.STOP', 'FinishReason.MAX_TOKENS', '0', '1', 'None'):
+                    _log(f"Blocked: finish_reason={finish}")
+                    emit({"type": "error", "error": f"Response blocked: {finish}"})
                     return
                 content = candidate.content
                 if not content or not content.parts:
+                    _log(f"Chunk {chunk_count}: finish_reason={finish}, no content/parts")
                     continue
                 for part in content.parts:
                     if hasattr(part, 'thought') and part.thought:
@@ -504,10 +504,17 @@ def run_gemini(message, history, connectors):
                     elif part.function_call:
                         function_calls.append(part)
 
+            _log(f"Stream done: chunks={chunk_count}, text={len(streamed_text)}, calls={len(function_calls)}, thinking={had_thinking}")
+
             if not streamed_text and not function_calls:
-                if had_thinking:
-                    # Model spent entire response thinking — retry once
+                if had_thinking and thinking_retries < 2:
+                    thinking_retries += 1
                     emit({"type": "thinking", "text": "Processing..."})
+                    # Disable thinking on retry to force actual output
+                    try:
+                        config.thinking_config = types.ThinkingConfig(thinking_budget=0)
+                    except Exception:
+                        pass
                     continue
                 emit({"type": "error", "error": "Empty response from Gemini"})
                 return
@@ -534,6 +541,16 @@ def run_gemini(message, history, connectors):
                     result = _get_briefing(connectors)
                 except Exception as e:
                     result = f"Briefing error: {e}"
+            elif tool_name == "search_knowledge":
+                try:
+                    import knowledge_base
+                    result = knowledge_base.search(
+                        args.get("query", ""),
+                        connector=args.get("connector"),
+                        max_results=args.get("max_results", 10),
+                    )
+                except Exception as e:
+                    result = f"Knowledge search error: {e}"
             elif module:
                 try:
                     result = _call_tool(module, tool_name, args, accounts)
@@ -579,13 +596,21 @@ def run_openai(message, history, connectors):
 
     emit({"type": "thinking", "text": "Connecting to OpenAI..."})
 
-    # Route to relevant connectors only
-    routed = route_tools(message, connectors)
+    # Smart tool routing — uses Gemini API key for routing even with OpenAI provider
+    import tool_router
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    allowed_tools = tool_router.route(message, connectors, gemini_key)
+    if allowed_tools:
+        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
 
-    # Build tool definitions + briefing
-    all_tool_defs, tool_map = build_tools_and_map(routed)
+    # Build tool definitions + briefing + knowledge
+    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
     all_tool_defs.append(BRIEFING_TOOL_DEF)
     tool_map["get_briefing"] = ("_briefing", None, [])
+
+    import knowledge_base
+    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
+    tool_map["search_knowledge"] = ("_knowledge", None, [])
 
     tool_defs = []
     for tool in all_tool_defs:
@@ -641,6 +666,15 @@ def run_openai(message, history, connectors):
                         result = _get_briefing(connectors)
                     except Exception as e:
                         result = f"Briefing error: {e}"
+                elif tool_name == "search_knowledge":
+                    try:
+                        result = knowledge_base.search(
+                            args.get("query", ""),
+                            connector=args.get("connector"),
+                            max_results=args.get("max_results", 10),
+                        )
+                    except Exception as e:
+                        result = f"Knowledge search error: {e}"
                 elif module:
                     try:
                         result = _call_tool(module, tool_name, args, accounts)
@@ -676,13 +710,21 @@ def run_claude(message, history, connectors):
 
     emit({"type": "thinking", "text": "Connecting to Claude..."})
 
-    # Route to relevant connectors only
-    routed = route_tools(message, connectors)
+    # Smart tool routing
+    import tool_router
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    allowed_tools = tool_router.route(message, connectors, gemini_key)
+    if allowed_tools:
+        emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
 
-    # Build tool definitions + briefing
-    all_tool_defs, tool_map = build_tools_and_map(routed)
+    # Build tool definitions + briefing + knowledge
+    all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
     all_tool_defs.append(BRIEFING_TOOL_DEF)
     tool_map["get_briefing"] = ("_briefing", None, [])
+
+    import knowledge_base
+    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
+    tool_map["search_knowledge"] = ("_knowledge", None, [])
 
     tool_defs = []
     for tool in all_tool_defs:
@@ -746,6 +788,15 @@ def run_claude(message, history, connectors):
                         result = _get_briefing(connectors)
                     except Exception as e:
                         result = f"Briefing error: {e}"
+                elif tool_name == "search_knowledge":
+                    try:
+                        result = knowledge_base.search(
+                            args.get("query", ""),
+                            connector=args.get("connector"),
+                            max_results=args.get("max_results", 10),
+                        )
+                    except Exception as e:
+                        result = f"Knowledge search error: {e}"
                 elif module:
                     try:
                         result = _call_tool(module, tool_name, args, accounts)

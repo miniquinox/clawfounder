@@ -124,6 +124,8 @@ VOICE_TOOL_WHITELIST = {
     "firebase_list_collections", "firebase_query",
     # Supabase
     "supabase_query",
+    # Knowledge base
+    "search_knowledge",
 }
 
 
@@ -179,8 +181,9 @@ _CACHEABLE_PREFIXES = (
 
 
 def _call_tool(module, tool_name, args, accounts):
-    """Call a connector's handle() with optional account_id routing + caching."""
+    """Call a connector's handle() with optional account_id routing + caching + knowledge indexing."""
     import tool_cache
+    import knowledge_base
 
     account_id = args.pop("account", None)
     if account_id is None and len(accounts) == 1:
@@ -190,6 +193,7 @@ def _call_tool(module, tool_name, args, accounts):
     if tool_name in _CACHEABLE_PREFIXES:
         cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
         if cached is not None:
+            knowledge_base.index(connector, tool_name, cached, args, account_id)
             return cached
 
     supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
@@ -200,6 +204,9 @@ def _call_tool(module, tool_name, args, accounts):
 
     if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
         tool_cache.put(tool_name, args, result, account_id=account_id)
+
+    if isinstance(result, str):
+        knowledge_base.index(connector, tool_name, result, args, account_id)
 
     return result
 
@@ -260,6 +267,7 @@ def build_system_prompt(connectors):
         "- For read-only actions, just do them. For actions that send/modify/delete, confirm first.",
         "- Summarize results verbally — don't read out raw data.",
         "- When the user asks for a summary, briefing, or 'what's going on', use the get_briefing tool to fetch everything at once rather than calling individual tools.",
+        "- When the user mentions a person, project, or topic, use search_knowledge FIRST to check for relevant context across all services before making direct tool calls.",
         "",
     ]
 
@@ -290,7 +298,7 @@ def build_system_prompt(connectors):
 
 # ── Gemini Live API session ──────────────────────────────────────
 
-LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-live-2.5-flash-native-audio")
 
 
 def _log(msg):
@@ -326,9 +334,13 @@ async def run_voice_session():
     all_tool_defs, tool_map = build_tools_and_map(connectors)
     system_prompt = build_system_prompt(connectors)
 
-    # Add the briefing tool
+    # Add the briefing + knowledge tools
     all_tool_defs.append(BRIEFING_TOOL_DEF)
     tool_map["get_briefing"] = ("_briefing", None, [])
+
+    import knowledge_base
+    all_tool_defs.append(knowledge_base.KNOWLEDGE_TOOL_DEF)
+    tool_map["search_knowledge"] = ("_knowledge", None, [])
 
     connected_names = sorted(connectors.keys())
     emit({"type": "text", "text": f"Connected services: {', '.join(connected_names) or 'none'}"})
@@ -340,8 +352,10 @@ async def run_voice_session():
             "name": tool["name"],
             "description": tool.get("description", ""),
         }
-        if "parameters" in tool:
-            fd_kwargs["parameters"] = tool["parameters"]
+        # Only include parameters if there are actual properties
+        params = tool.get("parameters", {})
+        if params.get("properties"):
+            fd_kwargs["parameters"] = params
         function_declarations.append(types.FunctionDeclaration(**fd_kwargs))
 
     # Live API config
@@ -458,6 +472,16 @@ async def _run_live_session(client, config, loop, tool_map, connectors):
                                             return _get_briefing(connectors)
                                         except Exception as e:
                                             return f"Briefing error: {e}"
+                                    if tn == "search_knowledge":
+                                        try:
+                                            import knowledge_base
+                                            return knowledge_base.search(
+                                                a.get("query", ""),
+                                                connector=a.get("connector"),
+                                                max_results=a.get("max_results", 10),
+                                            )
+                                        except Exception as e:
+                                            return f"Knowledge search error: {e}"
                                     lookup = tool_map.get(tn)
                                     if lookup:
                                         conn_name, module, accounts = lookup
