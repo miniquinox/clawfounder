@@ -12,6 +12,7 @@ import path from 'path';
 import os from 'os';
 import { fileURLToPath } from 'url';
 import { spawn, execSync } from 'child_process';
+import { WebSocketServer } from 'ws';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -29,8 +30,15 @@ const ACCOUNTS_FILE = path.join(CLAWFOUNDER_DIR, 'accounts.json');
 const BRIEFING_CONFIG_FILE = path.join(CLAWFOUNDER_DIR, 'briefing_config.json');
 
 const app = express();
-app.use(cors({ origin: /^https?:\/\/localhost(:\d+)?$/ }));
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+app.use(cors(IS_PRODUCTION ? {} : { origin: /^https?:\/\/localhost(:\d+)?$/ }));
 app.use(express.json());
+
+// ── Serve built frontend in production ──────────────────────────
+const DIST_DIR = path.join(__dirname, 'dist');
+if (fs.existsSync(DIST_DIR)) {
+    app.use(express.static(DIST_DIR));
+}
 
 // ── Parse .env file ─────────────────────────────────────────────
 function readEnv() {
@@ -1429,9 +1437,100 @@ app.post('/api/briefing', (req, res) => {
     });
 });
 
+// ── SPA fallback — serve index.html for non-API routes ──────────
+if (fs.existsSync(DIST_DIR)) {
+    app.get('/{*path}', (req, res, next) => {
+        if (req.path.startsWith('/api') || req.path.startsWith('/ws')) return next();
+        res.sendFile(path.join(DIST_DIR, 'index.html'));
+    });
+}
+
 // ── Start ───────────────────────────────────────────────────────
-const PORT = 3001;
-app.listen(PORT, () => {
+const PORT = process.env.PORT || 3001;
+const server = app.listen(PORT, () => {
     ensureAccountsRegistry();
     console.log(`🦀 ClawFounder API running on http://localhost:${PORT}`);
+});
+
+// ── Voice WebSocket (Gemini Live API bridge) ────────────────────
+
+const wss = new WebSocketServer({ server, path: '/ws/voice' });
+
+wss.on('connection', (ws) => {
+    console.log('[voice] WebSocket client connected');
+
+    const envVars = { ...process.env, ...readEnv() };
+    const voiceScript = path.join(__dirname, 'voice_agent.py');
+    const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+    const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython
+        : fs.existsSync(venvPython) ? venvPython : 'python3';
+
+    const proc = spawn(pythonCmd, [voiceScript], {
+        cwd: PROJECT_ROOT,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: envVars,
+    });
+
+    let procAlive = true;
+
+    // Prevent EPIPE from crashing the server
+    proc.stdin.on('error', (err) => {
+        if (err.code === 'EPIPE' || err.code === 'ERR_STREAM_DESTROYED') {
+            console.log('[voice] Python stdin closed (process exited)');
+        } else {
+            console.error('[voice] stdin error:', err.message);
+        }
+        procAlive = false;
+    });
+
+    // Send setup message with API key
+    proc.stdin.write(JSON.stringify({
+        type: 'setup',
+        api_key: envVars['GEMINI_API_KEY'] || '',
+    }) + '\n');
+
+    // Browser → Python: forward audio/control messages
+    ws.on('message', (data) => {
+        if (!procAlive) return;
+        try {
+            const msg = JSON.parse(data.toString());
+            proc.stdin.write(JSON.stringify(msg) + '\n');
+        } catch (e) {
+            console.error('[voice] Bad message from client:', e.message);
+        }
+    });
+
+    // Python → Browser: forward JSONL events
+    let buffer = '';
+    proc.stdout.on('data', (chunk) => {
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // keep incomplete line in buffer
+        for (const line of lines) {
+            if (line.trim() && ws.readyState === ws.OPEN) {
+                ws.send(line);
+            }
+        }
+    });
+
+    proc.stderr.on('data', (d) => {
+        const msg = d.toString().trim();
+        if (msg) console.error('[voice stderr]', msg);
+    });
+
+    // Cleanup on disconnect
+    ws.on('close', () => {
+        console.log('[voice] WebSocket client disconnected');
+        if (procAlive) {
+            try { proc.stdin.write(JSON.stringify({ type: 'end' }) + '\n'); } catch {}
+        }
+        setTimeout(() => { try { proc.kill(); } catch {} }, 1000);
+    });
+
+    proc.on('close', (code) => {
+        console.log(`[voice] Python process exited: ${code}`);
+        procAlive = false;
+        if (ws.readyState === ws.OPEN) ws.close();
+    });
 });

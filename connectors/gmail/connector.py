@@ -16,6 +16,7 @@ from email.mime.text import MIMEText
 _SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
 ]
 
 _TOKEN_DIR = Path.home() / ".clawfounder"
@@ -288,9 +289,11 @@ def _get_unread(max_results: int = 10, account_id=None) -> str:
         return "No unread emails."
 
     output = []
+    _METADATA_HEADERS = ["From", "To", "Subject", "Date", "Reply-To", "Message-ID"]
     for msg_ref in messages:
         msg = service.users().messages().get(
-            userId="me", id=msg_ref["id"], format="metadata"
+            userId="me", id=msg_ref["id"], format="metadata",
+            metadataHeaders=_METADATA_HEADERS,
         ).execute()
         headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
         output.append({
@@ -316,9 +319,11 @@ def _search(query: str, max_results: int = 5, account_id=None) -> str:
         return f"No emails found for query: {query}"
 
     output = []
+    _METADATA_HEADERS = ["From", "To", "Subject", "Date", "Reply-To", "Message-ID"]
     for msg_ref in messages:
         msg = service.users().messages().get(
-            userId="me", id=msg_ref["id"], format="metadata"
+            userId="me", id=msg_ref["id"], format="metadata",
+            metadataHeaders=_METADATA_HEADERS,
         ).execute()
         headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
         output.append({
@@ -413,7 +418,8 @@ def _reply(message_id: str, body: str, account_id=None) -> str:
     service = _get_gmail_service(account_id)
     # Get the original message for threading info
     original = service.users().messages().get(
-        userId="me", id=message_id, format="metadata"
+        userId="me", id=message_id, format="metadata",
+        metadataHeaders=["From", "To", "Subject", "Date", "Reply-To", "Message-ID"],
     ).execute()
     headers = {h["name"]: h["value"] for h in original.get("payload", {}).get("headers", [])}
     thread_id = original.get("threadId")

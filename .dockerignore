@@ -1,0 +1,13 @@
+.venv
+venv
+node_modules
+dashboard/node_modules
+dashboard/dist
+.env
+.git
+__pycache__
+*.pyc
+.DS_Store
+client_secret*.json
+.claude
+tests

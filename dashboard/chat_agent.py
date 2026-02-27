@@ -212,11 +212,12 @@ def build_system_prompt(connectors):
         "",
         "## Rules",
         "1. ALWAYS use tools to answer questions — never guess or say you can't when a tool exists.",
-        "2. When the user asks about emails, files, data, etc. — call the appropriate tool FIRST, then answer.",
-        "3. If a tool returns an error, report it honestly and suggest next steps.",
-        "4. Be brief. Don't narrate every step — just do it.",
-        "5. If multiple email accounts are connected, search ALL of them when looking something up.",
-        "6. When the user mentions a person by name, search your emails to find their address. "
+        "2. When the user asks for a summary, briefing, or 'what's going on', use the get_briefing tool.",
+        "3. When the user asks about emails, files, data, etc. — call the appropriate tool FIRST, then answer.",
+        "4. If a tool returns an error, report it honestly and suggest next steps.",
+        "5. Be brief. Don't narrate every step — just do it.",
+        "6. If multiple email accounts are connected, search ALL of them when looking something up.",
+        "7. When the user mentions a person by name, search your emails to find their address. "
         "The search results include `to` and `from` fields — use those.",
         "",
         "## Email Persona — CRITICAL",
@@ -288,18 +289,126 @@ def build_system_prompt(connectors):
 
 # ── Tool execution helper ────────────────────────────────────────
 
+# Read-only tools that are safe to cache
+_CACHEABLE_PREFIXES = (
+    "gmail_get_unread", "gmail_search", "gmail_read_email", "gmail_list_labels",
+    "work_email_get_unread", "work_email_search", "work_email_read_email",
+    "github_list_repos", "github_get_repo", "github_notifications", "github_list_prs",
+    "github_list_issues", "github_get_issue", "github_get_pr", "github_search",
+    "github_get_commits", "github_list_branches", "github_list_releases",
+    "github_get_file", "github_get_me", "github_list_tags", "github_list_gists",
+    "yahoo_finance_quote", "yahoo_finance_history", "yahoo_finance_search",
+    "telegram_get_updates",
+)
+
+
 def _call_tool(module, tool_name, args, accounts):
-    """Call a connector's handle() with optional account_id routing."""
+    """Call a connector's handle() with optional account_id routing + caching."""
+    import tool_cache
+
     account_id = args.pop("account", None)
     # Auto-select if only 1 account
     if account_id is None and len(accounts) == 1:
         account_id = accounts[0]["id"]
 
+    # Check cache for read-only tools
+    connector = tool_name.split("_")[0]
+    if tool_name in _CACHEABLE_PREFIXES:
+        cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
+        if cached is not None:
+            return cached
+
     supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
     if supports_multi and account_id:
-        return module.handle(tool_name, args, account_id=account_id)
+        result = module.handle(tool_name, args, account_id=account_id)
     else:
-        return module.handle(tool_name, args)
+        result = module.handle(tool_name, args)
+
+    # Cache the result for read-only tools
+    if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
+        tool_cache.put(tool_name, args, result, account_id=account_id)
+
+    return result
+
+
+# ── Briefing tool ────────────────────────────────────────────────
+
+BRIEFING_TOOL_DEF = {
+    "name": "get_briefing",
+    "description": (
+        "Get a summary of everything happening across the user's connected services — "
+        "emails, GitHub notifications, stock prices, messages, etc. "
+        "Use this when the user asks for a summary, briefing, or update on what's going on."
+    ),
+    "parameters": {"type": "object", "properties": {}},
+}
+
+
+def _get_briefing(connectors):
+    """Gather data from all connected services and return a summary."""
+    briefing_path = Path(__file__).parent / "briefing_agent.py"
+    spec = importlib.util.spec_from_file_location("briefing_agent", briefing_path)
+    briefing_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(briefing_mod)
+
+    config_file = Path.home() / ".clawfounder" / "briefing_config.json"
+    connector_configs = {}
+    if config_file.exists():
+        try:
+            connector_configs = json.loads(config_file.read_text()).get("connectors", {})
+        except Exception:
+            pass
+
+    gathered = briefing_mod.gather_data(connectors, connector_configs)
+
+    parts = []
+    for conn_name, data in gathered.items():
+        for item in data:
+            result = item.get("result", item.get("error", ""))
+            label = item.get("account", conn_name)
+            result_str = str(result)[:3000]
+            parts.append(f"[{conn_name}] {item.get('tool', '')} ({label}):\n{result_str}")
+
+    return "\n\n".join(parts) if parts else "No data available from connected services."
+
+
+# ── Tool router ──────────────────────────────────────────────────
+
+def route_tools(message, connectors, provider="gemini"):
+    """Use a fast model call to pick which connectors are relevant to the user's message.
+    Returns a filtered connectors dict with only the relevant ones."""
+    if len(connectors) <= 2:
+        return connectors  # Not worth routing for 1-2 connectors
+
+    available = sorted(connectors.keys())
+
+    # Quick keyword check first — avoids an API call for obvious cases
+    msg_lower = message.lower()
+    keyword_map = {
+        "gmail": ["email", "mail", "inbox", "unread", "gmail", "send", "draft", "reply"],
+        "work_email": ["work email", "work mail", "work inbox", "office email"],
+        "github": ["github", "repo", "pr", "pull request", "issue", "commit", "branch", "merge", "ci", "workflow", "notification"],
+        "yahoo_finance": ["stock", "price", "ticker", "market", "finance", "portfolio", "shares", "nasdaq", "s&p"],
+        "telegram": ["telegram", "tg", "message"],
+        "whatsapp": ["whatsapp", "wa"],
+        "firebase": ["firebase", "firestore", "collection", "document"],
+        "supabase": ["supabase", "database", "table", "query", "row"],
+    }
+
+    # Check for briefing/summary keywords — return all connectors
+    if any(kw in msg_lower for kw in ["briefing", "summary", "what's going on", "whats going on", "update me", "catch me up"]):
+        return connectors
+
+    matched = set()
+    for conn, keywords in keyword_map.items():
+        if conn in available and any(kw in msg_lower for kw in keywords):
+            matched.add(conn)
+
+    if matched:
+        return {k: v for k, v in connectors.items() if k in matched}
+
+    # No keyword match — return all (let the model figure it out)
+    return connectors
 
 
 # ── Provider: Gemini ─────────────────────────────────────────────
@@ -311,19 +420,23 @@ def run_gemini(message, history, connectors):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_CLOUD_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        emit({"type": "error", "error": "GEMINI_API_KEY not set."})
+        emit({"type": "error", "error": "GEMINI_API_KEY not set. Get one from aistudio.google.com/apikey"})
         return
 
-    # AI Studio keys start with "AIza", everything else is a GCP key needing Vertex AI
-    if api_key.startswith("AIza"):
-        client = genai.Client(api_key=api_key)
-    else:
-        client = genai.Client(vertexai=True)
+    client = genai.Client(api_key=api_key)
 
-    # Build tool declarations from connectors
-    all_tool_defs, tool_map = build_tools_and_map(connectors)
+    # Route to relevant connectors only
+    routed = route_tools(message, connectors)
+    if set(routed.keys()) != set(connectors.keys()):
+        emit({"type": "thinking", "text": f"Routing to: {', '.join(sorted(routed.keys()))}"})
+
+    # Build tool declarations from connectors + briefing
+    all_tool_defs, tool_map = build_tools_and_map(routed)
+    all_tool_defs.append(BRIEFING_TOOL_DEF)
+    tool_map["get_briefing"] = ("_briefing", None, [])
+
     gemini_fns = []
     for tool in all_tool_defs:
         gemini_fns.append(types.FunctionDeclaration(
@@ -363,6 +476,7 @@ def run_gemini(message, history, connectors):
         try:
             streamed_text = ""
             function_calls = []
+            had_thinking = False
 
             for chunk in client.models.generate_content_stream(
                 model=GEMINI_MODEL,
@@ -371,11 +485,18 @@ def run_gemini(message, history, connectors):
             ):
                 if not chunk.candidates:
                     continue
-                content = chunk.candidates[0].content
+                candidate = chunk.candidates[0]
+                # Check for blocked / safety-filtered responses
+                if hasattr(candidate, 'finish_reason') and candidate.finish_reason and \
+                   str(candidate.finish_reason) not in ('STOP', 'MAX_TOKENS', 'FinishReason.STOP', 'FinishReason.MAX_TOKENS', '0', '1'):
+                    emit({"type": "error", "error": f"Response blocked: {candidate.finish_reason}"})
+                    return
+                content = candidate.content
                 if not content or not content.parts:
                     continue
                 for part in content.parts:
                     if hasattr(part, 'thought') and part.thought:
+                        had_thinking = True
                         continue
                     if part.text:
                         streamed_text += part.text
@@ -384,6 +505,10 @@ def run_gemini(message, history, connectors):
                         function_calls.append(part)
 
             if not streamed_text and not function_calls:
+                if had_thinking:
+                    # Model spent entire response thinking — retry once
+                    emit({"type": "thinking", "text": "Processing..."})
+                    continue
                 emit({"type": "error", "error": "Empty response from Gemini"})
                 return
 
@@ -404,7 +529,12 @@ def run_gemini(message, history, connectors):
 
             emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
 
-            if module:
+            if tool_name == "get_briefing":
+                try:
+                    result = _get_briefing(connectors)
+                except Exception as e:
+                    result = f"Briefing error: {e}"
+            elif module:
                 try:
                     result = _call_tool(module, tool_name, args, accounts)
                 except Exception as e:
@@ -449,8 +579,14 @@ def run_openai(message, history, connectors):
 
     emit({"type": "thinking", "text": "Connecting to OpenAI..."})
 
-    # Build tool definitions
-    all_tool_defs, tool_map = build_tools_and_map(connectors)
+    # Route to relevant connectors only
+    routed = route_tools(message, connectors)
+
+    # Build tool definitions + briefing
+    all_tool_defs, tool_map = build_tools_and_map(routed)
+    all_tool_defs.append(BRIEFING_TOOL_DEF)
+    tool_map["get_briefing"] = ("_briefing", None, [])
+
     tool_defs = []
     for tool in all_tool_defs:
         tool_defs.append({
@@ -500,7 +636,12 @@ def run_openai(message, history, connectors):
 
                 emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
 
-                if module:
+                if tool_name == "get_briefing":
+                    try:
+                        result = _get_briefing(connectors)
+                    except Exception as e:
+                        result = f"Briefing error: {e}"
+                elif module:
                     try:
                         result = _call_tool(module, tool_name, args, accounts)
                     except Exception as e:
@@ -535,8 +676,14 @@ def run_claude(message, history, connectors):
 
     emit({"type": "thinking", "text": "Connecting to Claude..."})
 
-    # Build tool definitions
-    all_tool_defs, tool_map = build_tools_and_map(connectors)
+    # Route to relevant connectors only
+    routed = route_tools(message, connectors)
+
+    # Build tool definitions + briefing
+    all_tool_defs, tool_map = build_tools_and_map(routed)
+    all_tool_defs.append(BRIEFING_TOOL_DEF)
+    tool_map["get_briefing"] = ("_briefing", None, [])
+
     tool_defs = []
     for tool in all_tool_defs:
         tool_defs.append({
@@ -594,7 +741,12 @@ def run_claude(message, history, connectors):
 
                 emit({"type": "tool_call", "tool": tool_name, "connector": conn_name, "args": args})
 
-                if module:
+                if tool_name == "get_briefing":
+                    try:
+                        result = _get_briefing(connectors)
+                    except Exception as e:
+                        result = f"Briefing error: {e}"
+                elif module:
                     try:
                         result = _call_tool(module, tool_name, args, accounts)
                     except Exception as e:

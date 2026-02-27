@@ -90,15 +90,39 @@ def load_all_connectors():
     return loaded
 
 
+_CACHEABLE_PREFIXES = (
+    "gmail_get_unread", "gmail_search", "gmail_read_email", "gmail_list_labels",
+    "work_email_get_unread", "work_email_search", "work_email_read_email",
+    "github_list_repos", "github_get_repo", "github_notifications", "github_list_prs",
+    "github_list_issues", "github_get_issue", "github_get_pr", "github_search",
+    "yahoo_finance_quote", "yahoo_finance_history", "yahoo_finance_search",
+    "telegram_get_updates",
+)
+
+
 def _call_tool(module, tool_name, args, accounts):
+    import tool_cache
+
     account_id = args.pop("account", None)
     if account_id is None and len(accounts) == 1:
         account_id = accounts[0]["id"]
+
+    connector = tool_name.split("_")[0]
+    if tool_name in _CACHEABLE_PREFIXES:
+        cached = tool_cache.get(tool_name, args, account_id=account_id, connector=connector)
+        if cached is not None:
+            return cached
+
     supports_multi = getattr(module, "SUPPORTS_MULTI_ACCOUNT", False)
     if supports_multi and account_id:
-        return module.handle(tool_name, args, account_id=account_id)
+        result = module.handle(tool_name, args, account_id=account_id)
     else:
-        return module.handle(tool_name, args)
+        result = module.handle(tool_name, args)
+
+    if tool_name in _CACHEABLE_PREFIXES and isinstance(result, str):
+        tool_cache.put(tool_name, args, result, account_id=account_id)
+
+    return result
 
 
 # ── Briefing tool config — which tools to call per connector ─────
@@ -177,8 +201,21 @@ def build_tool_configs(conn_name, cfg, modules=None):
 
 def gather_data(connectors, connector_configs=None):
     """Call read-only tools on each connected connector. Returns raw data dict."""
+    import tool_cache
+    import hashlib
+
     if connector_configs is None:
         connector_configs = {}
+
+    # Check briefing-level cache
+    cache_key = hashlib.md5(
+        json.dumps(sorted(connectors.keys())).encode()
+    ).hexdigest()
+    cached = tool_cache.get_briefing(cache_key)
+    if cached is not None:
+        emit({"type": "thinking", "text": "Using cached briefing data..."})
+        return cached
+
     gathered = {}
 
     for conn_name, info in connectors.items():
@@ -247,6 +284,9 @@ def gather_data(connectors, connector_configs=None):
 
         emit({"type": "gather", "connector": conn_name, "tool": tool_configs[0]["tool"], "count": total_items})
         gathered[conn_name] = conn_data
+
+    # Cache the full briefing result
+    tool_cache.put_briefing(cache_key, gathered)
 
     return gathered
 
@@ -357,15 +397,12 @@ def _analyze_gemini(data_text, system_prompt):
     from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_CLOUD_API_KEY")
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         emit({"type": "error", "error": "GEMINI_API_KEY not set."})
         return []
 
-    if api_key.startswith("AIza"):
-        client = genai.Client(api_key=api_key)
-    else:
-        client = genai.Client(vertexai=True)
+    client = genai.Client(api_key=api_key)
 
     model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     response = client.models.generate_content(

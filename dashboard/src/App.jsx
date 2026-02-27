@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import ChatView from './ChatView'
 import BriefingView from './BriefingView'
+import VoiceView from './VoiceView'
+import SetupWizard from './SetupWizard'
 
 const CONNECTOR_META = {
   gmail: { emoji: '📧', label: 'Gmail', color: '#ea4335' },
@@ -1179,6 +1181,7 @@ export default function App() {
   const [saving, setSaving] = useState(false)
   const [toast, setToast] = useState(null)
   const [expandedConnector, setExpandedConnector] = useState(null)
+  const [showWizard, setShowWizard] = useState(false)
 
   const fetchAll = useCallback(async () => {
     const [cRes, cfgRes] = await Promise.all([
@@ -1189,6 +1192,12 @@ export default function App() {
     setConnectors(cData.connectors)
     setConfig(cfgData.config)
     setIsSetConfig(cfgData.isSet || {})
+
+    // Show setup wizard on first run (no LLM provider configured)
+    const hasAnyProvider = PROVIDER_KEYS.some(p => cfgData.isSet?.[p.key])
+    if (!hasAnyProvider && !sessionStorage.getItem('clawfounder_wizard_dismissed')) {
+      setShowWizard(true)
+    }
   }, [])
 
   useEffect(() => { fetchAll() }, [fetchAll])
@@ -1298,6 +1307,15 @@ export default function App() {
             >
               <span>💬</span> Chat
             </button>
+            <button
+              onClick={() => setTab('voice')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
+                ${tab === 'voice'
+                  ? 'bg-accent/20 text-accent-light shadow-sm'
+                  : 'text-claw-400 hover:text-claw-200'}`}
+            >
+              <span>🎙️</span> Voice
+            </button>
           </div>
         </div>
       </header>
@@ -1314,6 +1332,9 @@ export default function App() {
 
       {/* Chat Tab */}
       {tab === 'chat' && <ChatView prefillMessage={chatPrefill} onPrefillConsumed={() => setChatPrefill(null)} />}
+
+      {/* Voice Tab */}
+      {tab === 'voice' && <VoiceView />}
 
       {/* Connect Tab */}
       {tab === 'connect' && (
@@ -1522,6 +1543,16 @@ export default function App() {
             </div>
           </div>
         </main>
+      )}
+
+      {/* Setup Wizard overlay */}
+      {showWizard && (
+        <SetupWizard
+          onComplete={() => { setShowWizard(false); setTab('chat'); fetchAll() }}
+          onDismiss={() => { setShowWizard(false); sessionStorage.setItem('clawfounder_wizard_dismissed', 'true') }}
+          connectors={connectors}
+          isSetConfig={isSetConfig}
+        />
       )}
     </div>
   )
