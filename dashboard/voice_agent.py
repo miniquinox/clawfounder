@@ -34,6 +34,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_shared import (
     setup_env, emit, load_all_connectors, call_tool as _call_tool, get_briefing as _get_briefing,
+    get_gemini_client,
 )
 setup_env()
 
@@ -49,6 +50,10 @@ VOICE_TOOL_WHITELIST = {
     # GitHub (read-only summaries)
     "github_notifications", "github_list_prs", "github_get_pr",
     "github_list_issues", "github_get_issue",
+    # Slack (read + send)
+    "slack_get_messages", "slack_send_message",
+    # Calendar (read + create)
+    "calendar_list_events", "calendar_get_event",
     # Quick lookups
     "yahoo_finance_quote",
     "telegram_get_updates", "telegram_send_message",
@@ -171,14 +176,13 @@ async def run_voice_session():
 
     setup = json.loads(setup_line)
 
-    # Gemini uses AI Studio API key only (no Vertex AI / ADC)
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        emit({"type": "error", "error": "GEMINI_API_KEY not set. Get one from aistudio.google.com/apikey"})
+    try:
+        client = get_gemini_client()
+    except RuntimeError as e:
+        emit({"type": "error", "error": str(e)})
         return
 
-    _log(f"Auth: using API key ({api_key[:6]}...)")
-    client = genai.Client(api_key=api_key)
+    _log(f"Auth: Gemini client ready (vertex={bool(os.environ.get('GOOGLE_CLOUD_PROJECT'))})")
 
     # Load connectors and build tools
     connectors = load_all_connectors()

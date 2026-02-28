@@ -37,6 +37,12 @@ BRIEFING_TOOLS = {
     "github": [
         {"tool": "github_notifications", "args": {}},
     ],
+    "slack": [
+        {"tool": "slack_get_messages", "args": {"channel": "general", "limit": 10}},
+    ],
+    "google_calendar": [
+        {"tool": "calendar_list_events", "args": {"time_range": "today"}},
+    ],
     "telegram": [
         {"tool": "telegram_get_updates", "args": {"limit": 10}},
     ],
@@ -258,27 +264,38 @@ def analyze_with_gemini(gathered, provider="gemini", connector_configs=None):
 
     system_prompt = BRIEFING_SYSTEM_PROMPT + timeframe_prompt
 
-    if provider == "gemini":
-        return _analyze_gemini(data_text, system_prompt)
-    elif provider == "openai":
-        return _analyze_openai(data_text, system_prompt)
-    elif provider == "claude":
-        return _analyze_claude(data_text, system_prompt)
-    else:
-        emit({"type": "error", "error": f"Unknown provider: {provider}"})
-        return []
+    # Try the selected provider first, then fall back to others
+    providers = [provider]
+    if os.environ.get("OPENAI_API_KEY") and "openai" not in providers:
+        providers.append("openai")
+    if os.environ.get("ANTHROPIC_API_KEY") and "claude" not in providers:
+        providers.append("claude")
+    if (os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GEMINI_API_KEY")) and "gemini" not in providers:
+        providers.append("gemini")
+
+    dispatch = {"gemini": _analyze_gemini, "openai": _analyze_openai, "claude": _analyze_claude}
+
+    for p in providers:
+        fn = dispatch.get(p)
+        if not fn:
+            continue
+        try:
+            result = fn(data_text, system_prompt)
+            if result:
+                return result
+        except Exception as e:
+            emit({"type": "thinking", "text": f"{p} failed ({e}), trying next provider..."})
+            continue
+
+    emit({"type": "error", "error": "All LLM providers failed. Check your API keys."})
+    return []
 
 
 def _analyze_gemini(data_text, system_prompt):
-    from google import genai
     from google.genai import types
+    from agent_shared import get_gemini_client
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        emit({"type": "error", "error": "GEMINI_API_KEY not set."})
-        return []
-
-    client = genai.Client(api_key=api_key)
+    client = get_gemini_client()
 
     model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
     response = client.models.generate_content(
@@ -298,8 +315,7 @@ def _analyze_openai(data_text, system_prompt):
 
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
-        emit({"type": "error", "error": "OPENAI_API_KEY not set."})
-        return []
+        raise RuntimeError("OPENAI_API_KEY not set")
 
     model = os.environ.get("OPENAI_MODEL", "gpt-4o")
     resp = requests.post(
@@ -317,8 +333,7 @@ def _analyze_openai(data_text, system_prompt):
         timeout=60,
     )
     if resp.status_code != 200:
-        emit({"type": "error", "error": f"OpenAI error: {resp.status_code}"})
-        return []
+        raise RuntimeError(f"OpenAI error: {resp.status_code}")
 
     text = resp.json()["choices"][0]["message"]["content"]
     return _parse_tasks(text)
@@ -329,8 +344,7 @@ def _analyze_claude(data_text, system_prompt):
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        emit({"type": "error", "error": "ANTHROPIC_API_KEY not set."})
-        return []
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
 
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
     resp = requests.post(
@@ -349,8 +363,7 @@ def _analyze_claude(data_text, system_prompt):
         timeout=60,
     )
     if resp.status_code != 200:
-        emit({"type": "error", "error": f"Claude error: {resp.status_code}"})
-        return []
+        raise RuntimeError(f"Claude error: {resp.status_code}")
 
     text = resp.json()["content"][0]["text"]
     return _parse_tasks(text)

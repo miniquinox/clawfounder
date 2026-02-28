@@ -11,3 +11,4 @@ google-auth>=2.23.0                # gmail, work_email
 google-auth-httplib2>=0.2.0        # gmail, work_email
 supabase>=2.5.0                    # supabase
 yfinance>=0.2.30                   # yahoo_finance
+slack-sdk>=3.23.0                  # slack

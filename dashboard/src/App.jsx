@@ -7,6 +7,7 @@ import SetupWizard from './SetupWizard'
 const CONNECTOR_META = {
   gmail: { emoji: '📧', label: 'Gmail', color: '#ea4335' },
   work_email: { emoji: '💼', label: 'Work Email', color: '#4285f4' },
+  slack: { emoji: '💬', label: 'Slack', color: '#4A154B' },
   telegram: { emoji: '💬', label: 'Telegram', color: '#26a5e4' },
   github: { emoji: '🐙', label: 'GitHub', color: '#8b5cf6' },
   supabase: { emoji: '⚡', label: 'Supabase', color: '#3ecf8e' },
@@ -37,6 +38,16 @@ const CONNECTOR_SETUP = {
       { text: 'Click Generate token and copy it immediately' },
     ],
     tip: 'The token is only shown once. If you lose it, generate a new one.',
+  },
+  slack: {
+    title: 'Create a Slack Bot Token',
+    time: '~2 min',
+    steps: [
+      { text: 'Click', link: { label: 'Create Slack App (pre-configured)', url: 'https://api.slack.com/apps?new_app=1&manifest_json=%7B%22display_information%22%3A%7B%22name%22%3A%22ClawFounder%22%2C%22description%22%3A%22AI%20PM%20assistant%22%7D%2C%22features%22%3A%7B%22bot_user%22%3A%7B%22display_name%22%3A%22ClawFounder%22%2C%22always_online%22%3Atrue%7D%7D%2C%22oauth_config%22%3A%7B%22scopes%22%3A%7B%22bot%22%3A%5B%22channels%3Aread%22%2C%22channels%3Ahistory%22%2C%22groups%3Aread%22%2C%22groups%3Ahistory%22%2C%22chat%3Awrite%22%2C%22chat%3Awrite.public%22%2C%22users%3Aread%22%2C%22im%3Aread%22%5D%2C%22user%22%3A%5B%22search%3Aread%22%5D%7D%7D%2C%22settings%22%3A%7B%22org_deploy_enabled%22%3Afalse%2C%22socket_mode_enabled%22%3Afalse%2C%22token_rotation_enabled%22%3Afalse%7D%7D' }, suffix: '\u2192 pick your workspace \u2192 Create' },
+      { text: 'Click Install to Workspace and authorize' },
+      { text: 'Go to OAuth & Permissions \u2192 copy the Bot User OAuth Token (starts with xoxb-)' },
+    ],
+    tip: 'The bot can only see channels it has been invited to. Use /invite @YourBot in each channel.',
   },
   whatsapp: {
     title: 'Set up WhatsApp Cloud API',
@@ -88,9 +99,14 @@ function ConnectorSetupGuide({ connectorName }) {
 }
 
 const PROVIDER_KEYS = [
-  { key: 'GEMINI_API_KEY', label: 'Google Gemini', emoji: '✨' },
+  { key: 'GEMINI_API_KEY', label: 'Google Gemini', emoji: '✨', vertexai: true },
   { key: 'OPENAI_API_KEY', label: 'OpenAI', emoji: '🤖' },
   { key: 'ANTHROPIC_API_KEY', label: 'Anthropic Claude', emoji: '🧠' },
+]
+
+const VERTEX_KEYS = [
+  { key: 'GOOGLE_CLOUD_PROJECT', placeholder: 'your-project-id' },
+  { key: 'GOOGLE_CLOUD_LOCATION', placeholder: 'us-central1' },
 ]
 
 function FirebaseCard({ connector, onRefresh }) {
@@ -1088,6 +1104,11 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
                     : 'Read, search, and send emails. Token saved locally.'
                   }
                 </p>
+                {!status?.hasCalendarScopes && (
+                  <p className="text-[11px] text-blue-400 mt-1">
+                    📅 Re-authenticate to enable Google Calendar integration.
+                  </p>
+                )}
               </div>
             ) : (
               <button
@@ -1357,7 +1378,7 @@ export default function App() {
                         <span className="text-xl">{p.emoji}</span>
                         <span className="font-medium text-white text-sm">{p.label}</span>
                       </div>
-                      {hasValue(p.key) && (
+                      {(hasValue(p.key) || (p.vertexai && hasValue('GOOGLE_CLOUD_PROJECT'))) && (
                         <span className="w-2.5 h-2.5 rounded-full bg-success shadow-[0_0_8px_rgba(34,197,94,0.5)]" />
                       )}
                     </div>
@@ -1374,12 +1395,38 @@ export default function App() {
                         onClick={() => handleSave(p.key, editValues[p.key] || '')}
                         disabled={saving || !isEditing(p.key)}
                         className="px-4 py-2 rounded-lg text-sm font-medium transition-all
-                      bg-accent/20 text-accent-light hover:bg-accent/30 
+                      bg-accent/20 text-accent-light hover:bg-accent/30
                       disabled:opacity-30 disabled:cursor-not-allowed"
                       >
                         Save
                       </button>
                     </div>
+                    {p.vertexai && (
+                      <div className="mt-3 pt-3 border-t border-white/5 space-y-2">
+                        <div className="text-[11px] text-claw-400 font-medium">Vertex AI (optional — higher rate limits, uses Google Cloud credits)</div>
+                        {VERTEX_KEYS.map(v => (
+                          <div key={v.key} className="flex gap-2">
+                            <input
+                              type="text"
+                              placeholder={hasValue(v.key) ? config[v.key] : v.placeholder}
+                              value={editValues[v.key] ?? ''}
+                              onChange={e => setEditValues(prev => ({ ...prev, [v.key]: e.target.value }))}
+                              className="flex-1 bg-claw-900/60 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-claw-100
+                            placeholder:text-claw-500 focus:outline-none focus:border-accent/40 focus:ring-1 focus:ring-accent/20 transition-all"
+                            />
+                            <button
+                              onClick={() => handleSave(v.key, editValues[v.key] || '')}
+                              disabled={saving || !isEditing(v.key)}
+                              className="px-3 py-1.5 rounded-lg text-xs font-medium transition-all
+                            bg-accent/20 text-accent-light hover:bg-accent/30
+                            disabled:opacity-30 disabled:cursor-not-allowed"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

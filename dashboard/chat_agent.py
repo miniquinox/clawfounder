@@ -25,6 +25,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_shared import (
     setup_env, emit, load_all_connectors, call_tool as _call_tool, get_briefing as _get_briefing,
+    get_gemini_client,
 )
 setup_env()
 
@@ -287,7 +288,7 @@ def _proactive_search(message):
 
 # ── Shared provider setup ─────────────────────────────────────────
 
-def _provider_setup(message, connectors, router_api_key=None):
+def _provider_setup(message, connectors):
     """Run router + system prompt + proactive search in parallel.
 
     The router LLM call runs in a background thread while
@@ -299,7 +300,7 @@ def _provider_setup(message, connectors, router_api_key=None):
     # Start router in background thread (300-800ms LLM call)
     import tool_router
     with ThreadPoolExecutor(max_workers=1) as executor:
-        router_future = executor.submit(tool_router.route, message, connectors, router_api_key)
+        router_future = executor.submit(tool_router.route, message, connectors)
 
         # While router runs, do other setup work on main thread
         system = build_system_prompt(connectors)
@@ -335,18 +336,16 @@ GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 
 
 def run_gemini(message, history, connectors):
-    from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        emit({"type": "error", "error": "GEMINI_API_KEY not set. Get one from aistudio.google.com/apikey"})
+    try:
+        client = get_gemini_client()
+    except RuntimeError as e:
+        emit({"type": "error", "error": str(e)})
         return
 
-    client = genai.Client(api_key=api_key)
-
     # Parallel setup: router + system prompt + proactive search
-    all_tool_defs, tool_map, system, enriched_message = _provider_setup(message, connectors, api_key)
+    all_tool_defs, tool_map, system, enriched_message = _provider_setup(message, connectors)
 
     gemini_fns = []
     for tool in all_tool_defs:
@@ -441,7 +440,16 @@ def run_gemini(message, history, connectors):
                 return
 
         except Exception as e:
-            emit({"type": "error", "error": str(e)[:300]})
+            err = str(e)
+            # Retry on rate limit (429) with backoff
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                if turn < max_turns - 1:
+                    import time
+                    wait = 2 ** (turn + 1)  # 2s, 4s, 8s...
+                    emit({"type": "thinking", "text": f"Rate limited, retrying in {wait}s..."})
+                    time.sleep(wait)
+                    continue
+            emit({"type": "error", "error": err[:300]})
             return
 
         if not function_calls:
@@ -498,8 +506,7 @@ def run_openai(message, history, connectors):
     emit({"type": "thinking", "text": "Connecting to OpenAI..."})
 
     # Parallel setup: router + system prompt + proactive search
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    all_tool_defs, tool_map, system_prompt, enriched_message = _provider_setup(message, connectors, gemini_key)
+    all_tool_defs, tool_map, system_prompt, enriched_message = _provider_setup(message, connectors)
 
     tool_defs = []
     for tool in all_tool_defs:
@@ -584,8 +591,7 @@ def run_claude(message, history, connectors):
     emit({"type": "thinking", "text": "Connecting to Claude..."})
 
     # Parallel setup: router + system prompt + proactive search
-    gemini_key = os.environ.get("GEMINI_API_KEY")
-    all_tool_defs, tool_map, system, enriched_message = _provider_setup(message, connectors, gemini_key)
+    all_tool_defs, tool_map, system, enriched_message = _provider_setup(message, connectors)
 
     tool_defs = []
     for tool in all_tool_defs:

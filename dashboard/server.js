@@ -203,6 +203,9 @@ function discoverConnectors() {
     for (const folder of folders) {
         if (!folder.isDirectory() || folder.name.startsWith('_') || folder.name.startsWith('.')) continue;
 
+        // google_calendar piggybacks on Gmail OAuth — no separate card needed
+        if (folder.name === 'google_calendar') continue;
+
         const connectorPath = path.join(CONNECTORS_DIR, folder.name);
         const instructionsPath = path.join(connectorPath, 'instructions.md');
 
@@ -506,7 +509,9 @@ for (const connName of ['gmail', 'work_email']) {
                 const tokenData = JSON.parse(fs.readFileSync(tokenFile, 'utf-8'));
                 if (tokenData.refresh_token || tokenData.token) {
                     const email = tokenData._email || null;
-                    const resp = { loggedIn: true, email, loginInProgress: anyLoginInProgress, accounts };
+                    const scopes = tokenData.scopes || [];
+                    const hasCalendarScopes = scopes.some(s => s.includes('calendar'));
+                    const resp = { loggedIn: true, email, loginInProgress: anyLoginInProgress, accounts, hasCalendarScopes };
                     if (connName === 'gmail') resp.hasClientSecret = fs.existsSync(GMAIL_CLIENT_SECRET);
                     return res.json(resp);
                 }
@@ -996,11 +1001,17 @@ app.post('/api/accounts/:connector/add', (req, res) => {
             const connectors = discoverConnectors();
             const connDef = connectors.find(c => c.name === connector);
             if (connDef && connDef.envVars.length === 1) {
-                const derivedKey = `${connDef.envVars[0].key}_${id.toUpperCase().replace(/-/g, '_')}`;
+                const baseKey = connDef.envVars[0].key;
+                const derivedKey = `${baseKey}_${id.toUpperCase().replace(/-/g, '_')}`;
                 entry.env_key = derivedKey;
                 // Save the actual credential value to .env if provided
-                if (envValues && envValues[connDef.envVars[0].key]) {
-                    writeEnv({ [derivedKey]: envValues[connDef.envVars[0].key] });
+                if (envValues && envValues[baseKey]) {
+                    const updates = { [derivedKey]: envValues[baseKey] };
+                    // Also write the base key if this is the first account (so connectors that read the base key work)
+                    if (registry.accounts[connector].length === 0) {
+                        updates[baseKey] = envValues[baseKey];
+                    }
+                    writeEnv(updates);
                 }
             } else if (connDef && connDef.envVars.length > 1) {
                 const keys = {};
@@ -1011,6 +1022,10 @@ app.post('/api/accounts/:connector/add', (req, res) => {
                     // Save the actual credential value to .env if provided
                     if (envValues && envValues[v.key]) {
                         envUpdates[derivedKey] = envValues[v.key];
+                        // Also write the base key if this is the first account
+                        if (registry.accounts[connector].length === 0) {
+                            envUpdates[v.key] = envValues[v.key];
+                        }
                     }
                 }
                 entry.env_keys = keys;
@@ -1175,8 +1190,8 @@ app.get('/api/providers', (req, res) => {
     const env = readEnv();
     const providers = [];
 
-    // Any GEMINI_API_KEY works — Vertex AI REST endpoint accepts all key formats
-    if (env['GEMINI_API_KEY']) providers.push({ id: 'gemini', label: 'Gemini', emoji: '✨' });
+    // Gemini: Vertex AI (project ID) or AI Studio (API key)
+    if (env['GEMINI_API_KEY'] || env['GOOGLE_CLOUD_PROJECT']) providers.push({ id: 'gemini', label: 'Gemini', emoji: '✨' });
     if (env['OPENAI_API_KEY']) providers.push({ id: 'openai', label: 'OpenAI', emoji: '🤖' });
     if (env['ANTHROPIC_API_KEY']) providers.push({ id: 'claude', label: 'Claude', emoji: '🧠' });
 

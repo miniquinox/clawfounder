@@ -55,18 +55,18 @@ def _build_manifest(connectors):
     return "\n".join(lines)
 
 
-def _call_router(message, manifest, api_key):
+def _call_router(message, manifest):
     """Call a fast LLM to pick relevant tools. Returns list of tool names or None on failure."""
     try:
-        from google import genai
         from google.genai import types
+        from agent_shared import get_gemini_client
     except ImportError:
         return None
 
-    if not api_key:
+    try:
+        client = get_gemini_client()
+    except RuntimeError:
         return None
-
-    client = genai.Client(api_key=api_key)
 
     prompt = ROUTER_PROMPT.format(
         manifest=manifest,
@@ -150,7 +150,7 @@ def _fallback(connectors):
     return allowed
 
 
-def route(message, connectors, api_key=None):
+def route(message, connectors):
     """Route a user message to the relevant tools.
 
     Returns a set of tool name strings. The caller should filter
@@ -184,13 +184,9 @@ def route(message, connectors, api_key=None):
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Resolve API key
-    if not api_key:
-        api_key = os.environ.get("GEMINI_API_KEY")
-
     # Build manifest and call router
     manifest = _build_manifest(connectors)
-    result = _call_router(message, manifest, api_key)
+    result = _call_router(message, manifest)
 
     if result:
         # Cache the routing result

@@ -27,6 +27,27 @@ def setup_env():
         pass
 
 
+# ── Gemini client (Vertex AI preferred, AI Studio fallback) ───────
+
+def get_gemini_client():
+    """Create a google-genai Client. Prefers Vertex AI if configured, falls back to API key."""
+    from google import genai
+
+    project = os.environ.get("GOOGLE_CLOUD_PROJECT")
+    location = os.environ.get("GOOGLE_CLOUD_LOCATION", "us-central1")
+
+    if project:
+        return genai.Client(vertexai=True, project=project, location=location)
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if api_key:
+        return genai.Client(api_key=api_key)
+
+    raise RuntimeError(
+        "No Gemini credentials. Set GOOGLE_CLOUD_PROJECT (Vertex AI) or GEMINI_API_KEY (AI Studio)."
+    )
+
+
 # ── JSONL output ──────────────────────────────────────────────────
 
 def emit(event):
@@ -107,6 +128,8 @@ CACHEABLE_TOOLS = (
     "github_list_issues", "github_get_issue", "github_get_pr", "github_search",
     "github_get_commits", "github_list_branches", "github_list_releases",
     "github_get_file", "github_get_me", "github_list_tags", "github_list_gists",
+    "slack_list_channels", "slack_get_messages", "slack_list_users", "slack_search",
+    "calendar_list_events", "calendar_get_event", "calendar_list_calendars",
     "yahoo_finance_quote", "yahoo_finance_history", "yahoo_finance_search",
     "telegram_get_updates",
 )

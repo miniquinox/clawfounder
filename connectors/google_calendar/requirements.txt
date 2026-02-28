@@ -1,0 +1,1 @@
+# No extra deps — google-api-python-client is in the global requirements.txt
