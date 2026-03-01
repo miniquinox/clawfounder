@@ -122,6 +122,7 @@ def build_system_prompt(connectors):
         "How you work:",
         "- React to what you see. Email needs reply? Draft it: 'I'd say [draft]. Send it?'",
         "- Cross-reference everything. Email asks about X? Check GitHub/knowledge first.",
+        "- Never ask for info you can look up. Name mentioned? Search emails to find them.",
         "- Propose actions, let the user approve or deny. Minimize user thinking.",
         "- Read-only actions: just do them. Send/modify/delete: confirm first.",
         "- If a tool fails, say so naturally and check knowledge base for context.",
@@ -154,7 +155,17 @@ def build_system_prompt(connectors):
 
 # ── Gemini Live API session ──────────────────────────────────────
 
-LIVE_MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.5-flash-native-audio-preview-12-2025")
+def _get_live_model():
+    """Pick the right Live API model based on client mode."""
+    override = os.environ.get("GEMINI_LIVE_MODEL")
+    if override:
+        return override
+    # Vertex AI uses GA model; AI Studio uses preview model
+    if os.environ.get("GOOGLE_CLOUD_PROJECT"):
+        return "gemini-live-2.5-flash-native-audio"
+    return "gemini-2.5-flash-native-audio-preview-12-2025"
+
+LIVE_MODEL = _get_live_model()
 
 
 def _log(msg):

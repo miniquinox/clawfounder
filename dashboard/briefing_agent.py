@@ -370,22 +370,36 @@ def _analyze_claude(data_text, system_prompt):
 
 
 def _parse_tasks(text):
-    """Parse LLM response into task list. Handles markdown fences."""
+    """Parse LLM response into task list. Handles markdown fences, preamble, etc."""
     text = text.strip()
-    # Strip markdown code fences if present
-    if text.startswith("```"):
-        lines = text.split("\n")
-        lines = lines[1:]  # Remove opening fence
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
 
+    # Strip markdown code fences if present
+    if "```" in text:
+        import re
+        match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+
+    # Try direct parse first
     try:
         tasks = json.loads(text)
         if isinstance(tasks, list):
             return tasks
     except json.JSONDecodeError:
-        emit({"type": "error", "error": "Failed to parse LLM response as JSON"})
+        pass
+
+    # LLM may have added preamble/postamble — find the JSON array
+    import re
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    if match:
+        try:
+            tasks = json.loads(match.group())
+            if isinstance(tasks, list):
+                return tasks
+        except json.JSONDecodeError:
+            pass
+
+    emit({"type": "error", "error": "Failed to parse LLM response as JSON"})
     return []
 
 

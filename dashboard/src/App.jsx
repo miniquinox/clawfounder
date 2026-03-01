@@ -1404,6 +1404,11 @@ export default function App() {
                     {p.vertexai && (
                       <div className="mt-3 pt-3 border-t border-white/5 space-y-2">
                         <div className="text-[11px] text-claw-400 font-medium">Vertex AI (optional — higher rate limits, uses Google Cloud credits)</div>
+                        <ol className="text-[10px] text-claw-500 list-decimal ml-3 space-y-0.5 mb-1">
+                          <li>Enable <a href="https://console.cloud.google.com/apis/library/aiplatform.googleapis.com" target="_blank" rel="noopener" className="underline hover:text-claw-300">Vertex AI API</a> in your Google Cloud project</li>
+                          <li>Run <code className="bg-white/5 px-1 rounded">gcloud auth application-default login</code></li>
+                          <li>Enter your Project ID below</li>
+                        </ol>
                         {VERTEX_KEYS.map(v => (
                           <div key={v.key} className="flex gap-2">
                             <input

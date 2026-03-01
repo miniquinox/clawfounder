@@ -34,7 +34,8 @@ User message: "{message}"
 Return ONLY a JSON array of tool name strings. Rules:
 - Include only tools needed to fulfill the request
 - For read queries, include read tools only
-- For action queries (send, create, delete), include the action tool + its read counterpart for context
+- For action queries (send, create, reply, draft, forward), ALWAYS include search/read tools too — the agent needs to look up recipients, context, and related data before acting
+- When a person's name is mentioned, include search tools (email search, Slack users, GitHub) to find their contact info
 - When the intent is unclear, include broadly relevant read-only tools
 - Max {max_tools} tools
 - Return valid JSON array, nothing else"""

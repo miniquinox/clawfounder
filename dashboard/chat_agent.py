@@ -128,6 +128,8 @@ def build_system_prompt(connectors):
         "4. EXECUTE: On confirmation, act immediately.",
         "",
         "## Reactive behavior — this is key",
+        "- NEVER ask the user for info you can look up. Name mentioned? Search emails/Slack to find them. "
+        "Repo mentioned? Search GitHub. Always search first, ask later.",
         "- Email needs reply? Draft it and show: 'I'd reply: [draft]. Send it?'",
         "- PR needs review? Summarize changes and say: 'Looks like a config fix. Approve it?'",
         "- Someone waiting on the user? Flag it: 'Sarah asked about X twice. Here's a draft reply.'",
