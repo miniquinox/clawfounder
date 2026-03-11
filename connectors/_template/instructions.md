@@ -42,7 +42,7 @@ python3 tests/validate_connector.py connectors/your_service
 # Run unit tests
 python3 -m pytest connectors/your_service/test_connector.py -v
 
-# Test with the agent
-python3 -m agent.runner --provider gemini
-# Ask: "Your test question here"
+# Test with voice
+bash start.sh
+# Open http://localhost:5173 and use voice to test your connector
 ```

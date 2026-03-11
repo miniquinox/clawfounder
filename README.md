@@ -55,18 +55,6 @@ bash doctor.sh
 
 It checks Python version, Node.js, venv packages, dashboard deps, API keys, Firebase CLI auth, port availability — and tells you exactly what to fix.
 
-### CLI Mode (alternative)
-
-If you prefer the terminal instead of the dashboard:
-
-```bash
-source venv/bin/activate
-python -m agent.runner --provider gemini
-# Try: "Do I have any unread emails?"
-```
-
-Pick your LLM provider: `gemini`, `openai`, or `claude`.
-
 ---
 
 ## Dashboard
@@ -74,16 +62,15 @@ Pick your LLM provider: `gemini`, `openai`, or `claude`.
 The web dashboard at `http://localhost:5173` gives you:
 
 - **⚙️ Connect** — Configure API keys and authenticate with services (Gmail, GitHub, Firebase, etc.)
-- **💬 Chat** — Talk to your AI agent in a rich chat interface with:
-  - Real-time SSE streaming
-  - Markdown-rendered responses
-  - Expandable tool call cards showing arguments and results
-  - Provider selector (Gemini, OpenAI, Claude)
-  - Multi-turn conversation history
+- **🎤 Voice** — Talk to your AI agent using voice with:
+  - Real-time voice interaction via Gemini Live API
+  - Spoken responses with natural conversation flow
+  - Tool execution with visual feedback
+  - Proactive briefings and updates
 
 The dashboard runs two servers:
 - **Vite** (port 5173) — Frontend dev server
-- **Express** (port 3001) — API backend that spawns the Python chat agent
+- **Express** (port 3001) — API backend that spawns the Python voice agent
 
 ---
 
@@ -97,8 +84,6 @@ clawfounder/
 ├── .env.example
 │
 ├── agent/                   ← The brain
-│   ├── runner.py            ← CLI entry point
-│   ├── providers/           ← Gemini, OpenAI, Claude wrappers
 │   ├── connector_loader.py  ← Auto-discovers your connectors
 │   └── tool_router.py       ← Routes AI tool calls → connectors
 │
@@ -112,11 +97,13 @@ clawfounder/
 │   └── yahoo_finance/
 │
 ├── dashboard/               ← Web UI
-│   ├── server.js            ← Express API + SSE streaming
-│   ├── chat_agent.py        ← Python agent with agentic loop
+│   ├── server.js            ← Express API + WebSocket server
+│   ├── voice_agent.py       ← Python voice agent (Gemini Live API)
+│   ├── briefing_agent.py    ← Morning briefing generator
+│   ├── agent_shared.py      ← Shared connector utilities
 │   ├── src/
-│   │   ├── App.jsx          ← Main app with tabs (Connect / Chat)
-│   │   ├── ChatView.jsx     ← Chat interface with markdown
+│   │   ├── App.jsx          ← Main app with tabs (Connect / Voice)
+│   │   ├── VoiceView.jsx    ← Voice interface
 │   │   └── index.css        ← Styles
 │   ├── vite.config.js       ← Vite + proxy config
 │   └── package.json
@@ -135,7 +122,7 @@ clawfounder/
 1. Copy `connectors/_template/` → `connectors/your_service/`
 2. Fill in the 5 files
 3. Run `python3 tests/validate_connector.py connectors/your_service`
-4. Run `python3 -m agent.runner --provider gemini` and test it
+4. Test with the voice dashboard at `http://localhost:5173`
 5. Open a PR
 
 **Long version:** See [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -189,10 +176,11 @@ This checks:
 - ✅ `handle()` is callable
 
 ### Step 2 — Live Test
+Start the dashboard and test with voice:
 ```bash
-python3 -m agent.runner --provider gemini
+bash start.sh
+# Open http://localhost:5173 and use voice to test your connector
 ```
-Ask a question that triggers your connector. If it works, you're good.
 
 ### Step 3 — Unit Tests
 ```bash

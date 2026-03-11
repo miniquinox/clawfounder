@@ -291,7 +291,7 @@ export default function VoiceView() {
 
         {/* Status label */}
         <div className="text-sm text-claw-400 mb-6 h-5">
-          {status === 'idle' && 'Click to start voice chat'}
+          {status === 'idle' && 'Click to start'}
           {status === 'connecting' && 'Connecting to Gemini Live...'}
           {status === 'listening' && <span className="text-accent-light">Listening...</span>}
           {status === 'speaking' && <span className="text-accent-light">Speaking...</span>}

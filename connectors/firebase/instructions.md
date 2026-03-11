@@ -51,6 +51,6 @@ npx firebase-tools login
 
 ```bash
 python3 -m pytest connectors/firebase/test_connector.py -v
-python3 -m agent.runner --provider gemini
-# Ask: "List the documents in my users collection"
+bash start.sh
+# Open http://localhost:5173 and ask via voice: "List the documents in my users collection"
 ```

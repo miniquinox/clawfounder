@@ -32,6 +32,6 @@ bash install.sh
 
 ```bash
 python3 -m pytest connectors/yahoo_finance/test_connector.py -v
-python3 -m agent.runner --provider gemini
-# Ask: "What's the current price of AAPL?"
+bash start.sh
+# Open http://localhost:5173 and ask via voice: "What's the current price of AAPL?"
 ```

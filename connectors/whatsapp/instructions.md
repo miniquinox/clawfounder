@@ -81,6 +81,6 @@ bash install.sh
 
 ```bash
 python3 -m pytest connectors/whatsapp/test_connector.py -v
-python3 -m agent.runner --provider gemini
-# Ask: "Send a WhatsApp message to 14155551234 saying hello"
+bash start.sh
+# Open http://localhost:5173 and ask via voice: "Send a WhatsApp message to 14155551234 saying hello"
 ```

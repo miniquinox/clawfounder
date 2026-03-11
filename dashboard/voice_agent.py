@@ -32,8 +32,8 @@ PROJECT_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from agent_shared import (
-    setup_env, emit, load_all_connectors, call_tool as _call_tool,
-    get_briefing as _get_briefing, get_gemini_client,
+    setup_env, emit, load_all_connectors, get_gemini_client,
+    build_connector_map, route_voice_tool, build_voice_system_prompt,
 )
 setup_env()
 
@@ -284,92 +284,7 @@ COMBINED_TOOL_DEFS = [
 
 
 # ── Tool routing ─────────────────────────────────────────────────
-
-def _build_connector_map(connectors):
-    tool_map = {}
-    for conn_name, info in connectors.items():
-        for tool in info["module"].TOOLS:
-            tool_map[tool["name"]] = (conn_name, info["module"], info["accounts"])
-    return tool_map
-
-
-def _route_tool(tool_name, args, tool_map, connectors):
-    """Route a combined voice tool to the underlying connector."""
-    if tool_name == "get_briefing":
-        return _get_briefing(connectors)
-
-    if tool_name == "search_knowledge":
-        import knowledge_base
-        return knowledge_base.search(args.get("query", ""), max_results=10)
-
-    if tool_name == "show_draft":
-        return json.dumps({
-            "draft": True,
-            "to": args.get("to", ""),
-            "to_name": args.get("to_name", ""),
-            "subject": args.get("subject", ""),
-            "body": args.get("body", ""),
-        })
-
-    if tool_name == "save_knowledge":
-        import knowledge_base
-        tags = [t.strip() for t in args.get("tags", "").split(",") if t.strip()] if args.get("tags") else []
-        note = knowledge_base.add_note(
-            content=args.get("content", ""),
-            title=args.get("title", ""),
-            tags=tags,
-        )
-        return f"Saved: {note.get('title', 'note')} (id: {note.get('id')})"
-
-    if tool_name == "finance":
-        lookup = tool_map.get("yahoo_finance_quote")
-        if lookup:
-            _, mod, accts = lookup
-            return _call_tool(mod, "yahoo_finance_quote", {"symbol": args.get("symbol", "")}, accts)
-        return "Finance not connected."
-
-    if tool_name == "email":
-        action = args.get("action", "get_unread")
-        account = args.get("account", "personal")
-        prefix = "work_email" if "work" in account.lower() else "gmail"
-        real_tool = f"{prefix}_{action}"
-        lookup = tool_map.get(real_tool)
-        if not lookup:
-            return f"Email action '{action}' not available."
-        _, mod, accts = lookup
-        call_args = {k: v for k, v in args.items() if k not in ("action", "account") and v is not None}
-        return _call_tool(mod, real_tool, call_args, accts)
-
-    if tool_name == "github":
-        action = args.get("action", "notifications")
-        real_tool = f"github_{action}"
-        lookup = tool_map.get(real_tool)
-        if not lookup:
-            return f"GitHub action '{action}' not available."
-        _, mod, accts = lookup
-        call_args = {k: v for k, v in args.items() if k != "action" and v is not None}
-        return _call_tool(mod, real_tool, call_args, accts)
-
-    if tool_name == "calendar":
-        action = args.get("action", "list_events")
-        real_tool = f"calendar_{action}"
-        lookup = tool_map.get(real_tool)
-        if not lookup:
-            return f"Calendar action '{action}' not available."
-        _, mod, accts = lookup
-        call_args = {k: v for k, v in args.items() if k != "action" and v is not None}
-        return _call_tool(mod, real_tool, call_args, accts)
-
-    if tool_name == "messaging":
-        action = args.get("action", "")
-        lookup = tool_map.get(action)
-        if not lookup:
-            return f"Messaging action '{action}' not available."
-        _, mod, accts = lookup
-        call_args = {k: v for k, v in args.items() if k != "action" and v is not None}
-        return _call_tool(mod, action, call_args, accts)
-
-    return f"Unknown tool: {tool_name}"
+# (Moved to agent_shared.py — using build_connector_map and route_voice_tool)
 
 
 def _build_card(tool_name, args, result_str):
@@ -439,14 +354,7 @@ Briefing:
 """
 
 
-def build_system_prompt(connectors, briefing, memory):
-    memory_str = memory.format_for_prompt() if memory else "No prior context."
-    services = ", ".join(sorted(connectors.keys())) or "none"
-    return SYSTEM_PROMPT_BASE.format(
-        memory=memory_str,
-        services=services,
-        briefing=briefing[:800] if briefing else "Not yet loaded.",
-    )
+# build_system_prompt moved to agent_shared.py as build_voice_system_prompt
 
 
 # ── Gemini Live API ──────────────────────────────────────────────
@@ -498,14 +406,15 @@ async def run_voice_session():
 
     # Load connectors
     connectors = load_all_connectors()
-    tool_map = _build_connector_map(connectors)
+    tool_map = build_connector_map(connectors)
     emit({"type": "text", "text": f"Connected services: {', '.join(sorted(connectors.keys())) or 'none'}"})
 
     # Pre-cache briefing
+    from agent_shared import get_briefing
     briefing = ""
     try:
         _log("Caching briefing...")
-        briefing = _get_briefing(connectors)
+        briefing = get_briefing(connectors)
         _log(f"Briefing ready ({len(briefing)} chars)")
     except Exception as e:
         _log(f"Briefing failed: {e}")
@@ -525,7 +434,7 @@ async def run_voice_session():
     _log(f"Model: {LIVE_MODEL} | Tools: {len(func_decls)}")
 
     def _build_config(resume_handle=None):
-        prompt = build_system_prompt(connectors, briefing, memory)
+        prompt = build_voice_system_prompt(connectors, briefing, memory, SYSTEM_PROMPT_BASE)
         kw = dict(
             response_modalities=["AUDIO"],
             system_instruction=types.Content(parts=[types.Part(text=prompt)]),
@@ -668,7 +577,7 @@ async def _run_session(client, config, loop, tool_map, connectors, memory):
                             # Execute in thread pool (connectors are sync)
                             def _exec(name=tn, args=ta):
                                 try:
-                                    return _route_tool(name, args, tool_map, connectors)
+                                    return route_voice_tool(name, args, tool_map, connectors)
                                 except Exception as e:
                                     _log(f"Tool {name} error: {e}")
                                     return f"Error: {e}"

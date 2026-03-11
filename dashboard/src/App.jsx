@@ -1,8 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import ChatView from './ChatView'
-import BriefingView from './BriefingView'
 import VoiceView from './VoiceView'
-import NotesView from './NotesView'
 import SetupWizard from './SetupWizard'
 
 const CONNECTOR_META = {
@@ -1194,8 +1191,7 @@ function EmailCard({ connector, onRefresh, connectorName = 'gmail' }) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState('connect')
-  const [chatPrefill, setChatPrefill] = useState(null)
+  const [tab, setTab] = useState('voice')
   const [connectors, setConnectors] = useState([])
   const [config, setConfig] = useState({})
   const [isSetConfig, setIsSetConfig] = useState({})
@@ -1303,33 +1299,6 @@ export default function App() {
           {/* Tabs */}
           <div className="flex bg-white/[0.04] rounded-xl p-1 border border-white/5">
             <button
-              onClick={() => setTab('connect')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                ${tab === 'connect'
-                  ? 'bg-accent/20 text-accent-light shadow-sm'
-                  : 'text-claw-400 hover:text-claw-200'}`}
-            >
-              <span>⚙️</span> Connect
-            </button>
-            <button
-              onClick={() => setTab('briefing')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                ${tab === 'briefing'
-                  ? 'bg-accent/20 text-accent-light shadow-sm'
-                  : 'text-claw-400 hover:text-claw-200'}`}
-            >
-              <span>📋</span> Briefing
-            </button>
-            <button
-              onClick={() => setTab('chat')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                ${tab === 'chat'
-                  ? 'bg-accent/20 text-accent-light shadow-sm'
-                  : 'text-claw-400 hover:text-claw-200'}`}
-            >
-              <span>💬</span> Chat
-            </button>
-            <button
               onClick={() => setTab('voice')}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
                 ${tab === 'voice'
@@ -1339,36 +1308,20 @@ export default function App() {
               <span>🎙️</span> Voice
             </button>
             <button
-              onClick={() => setTab('notes')}
+              onClick={() => setTab('connect')}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                ${tab === 'notes'
+                ${tab === 'connect'
                   ? 'bg-accent/20 text-accent-light shadow-sm'
                   : 'text-claw-400 hover:text-claw-200'}`}
             >
-              <span>📚</span> Notes
+              <span>⚙️</span> Connect
             </button>
           </div>
         </div>
       </header>
 
-      {/* Briefing Tab */}
-      {tab === 'briefing' && (
-        <BriefingView
-          onSwitchToChat={(message) => {
-            setChatPrefill(message)
-            setTab('chat')
-          }}
-        />
-      )}
-
-      {/* Chat Tab */}
-      {tab === 'chat' && <ChatView prefillMessage={chatPrefill} onPrefillConsumed={() => setChatPrefill(null)} />}
-
       {/* Voice Tab */}
       {tab === 'voice' && <VoiceView />}
-
-      {/* Notes Tab */}
-      {tab === 'notes' && <NotesView />}
 
       {/* Connect Tab */}
       {tab === 'connect' && (
@@ -1613,7 +1566,7 @@ export default function App() {
       {/* Setup Wizard overlay */}
       {showWizard && (
         <SetupWizard
-          onComplete={() => { setShowWizard(false); setTab('chat'); fetchAll() }}
+          onComplete={() => { setShowWizard(false); setTab('voice'); fetchAll() }}
           onDismiss={() => { setShowWizard(false); sessionStorage.setItem('clawfounder_wizard_dismissed', 'true') }}
           connectors={connectors}
           isSetConfig={isSetConfig}

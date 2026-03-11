@@ -24,9 +24,9 @@ cp -r connectors/_template connectors/your_service
 # 5. Validate
 python tests/validate_connector.py connectors/your_service
 
-# 6. Test with the agent
-python -m agent.runner --provider gemini
-# Ask a question that triggers your connector
+# 6. Test with voice
+bash start.sh
+# Open http://localhost:5173 and use voice to test your connector
 
 # 7. Run your unit tests
 python -m pytest connectors/your_service/test_connector.py -v
@@ -162,7 +162,7 @@ Before you open a PR, make sure:
 - [ ] Structure validation passes: `python3 tests/validate_connector.py connectors/your_service`
 - [ ] Your `.env.example` additions are documented (if you need new env vars)
 - [ ] `instructions.md` explains everything a first-timer needs to know
-- [ ] You tested with at least one provider: `python3 -m agent.runner --provider gemini`
+- [ ] You tested with voice: `bash start.sh` and used the voice interface
 
 ---
 

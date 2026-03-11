@@ -1,7 +1,7 @@
 """
 ClawFounder — Shared Agent Utilities
 
-Common code used by chat_agent.py, voice_agent.py, and briefing_agent.py.
+Common code used by voice_agent.py and briefing_agent.py.
 Single source of truth for connector loading, tool execution, and caching.
 """
 
@@ -202,3 +202,119 @@ def get_briefing(connectors):
             parts.append(f"[{conn_name}] {item.get('tool', '')} ({label}):\n{result_str}")
 
     return "\n\n".join(parts) if parts else "No data available from connected services."
+
+
+# ── Voice agent utilities ─────────────────────────────────────────
+
+def build_connector_map(connectors):
+    """Build a map of tool names to (connector_name, module, accounts) tuples."""
+    tool_map = {}
+    for conn_name, info in connectors.items():
+        for tool in info["module"].TOOLS:
+            tool_map[tool["name"]] = (conn_name, info["module"], info["accounts"])
+    return tool_map
+
+
+def route_voice_tool(tool_name, args, tool_map, connectors):
+    """Route a combined voice tool to the underlying connector.
+
+    Handles special voice tools like get_briefing, search_knowledge, show_draft,
+    and routes combined tools (email, github, calendar, messaging, finance) to
+    their underlying connector implementations.
+    """
+    if tool_name == "get_briefing":
+        return get_briefing(connectors)
+
+    if tool_name == "search_knowledge":
+        import knowledge_base
+        return knowledge_base.search(args.get("query", ""), max_results=10)
+
+    if tool_name == "show_draft":
+        return json.dumps({
+            "draft": True,
+            "to": args.get("to", ""),
+            "to_name": args.get("to_name", ""),
+            "subject": args.get("subject", ""),
+            "body": args.get("body", ""),
+        })
+
+    if tool_name == "save_knowledge":
+        import knowledge_base
+        tags = [t.strip() for t in args.get("tags", "").split(",") if t.strip()] if args.get("tags") else []
+        note = knowledge_base.add_note(
+            content=args.get("content", ""),
+            title=args.get("title", ""),
+            tags=tags,
+        )
+        return f"Saved: {note.get('title', 'note')} (id: {note.get('id')})"
+
+    if tool_name == "finance":
+        lookup = tool_map.get("yahoo_finance_quote")
+        if lookup:
+            _, mod, accts = lookup
+            return call_tool(mod, "yahoo_finance_quote", {"symbol": args.get("symbol", "")}, accts)
+        return "Finance not connected."
+
+    if tool_name == "email":
+        action = args.get("action", "get_unread")
+        account = args.get("account", "personal")
+        prefix = "work_email" if "work" in account.lower() else "gmail"
+        real_tool = f"{prefix}_{action}"
+        lookup = tool_map.get(real_tool)
+        if not lookup:
+            return f"Email action '{action}' not available."
+        _, mod, accts = lookup
+        call_args = {k: v for k, v in args.items() if k not in ("action", "account") and v is not None}
+        return call_tool(mod, real_tool, call_args, accts)
+
+    if tool_name == "github":
+        action = args.get("action", "notifications")
+        real_tool = f"github_{action}"
+        lookup = tool_map.get(real_tool)
+        if not lookup:
+            return f"GitHub action '{action}' not available."
+        _, mod, accts = lookup
+        call_args = {k: v for k, v in args.items() if k != "action" and v is not None}
+        return call_tool(mod, real_tool, call_args, accts)
+
+    if tool_name == "calendar":
+        action = args.get("action", "list_events")
+        real_tool = f"calendar_{action}"
+        lookup = tool_map.get(real_tool)
+        if not lookup:
+            return f"Calendar action '{action}' not available."
+        _, mod, accts = lookup
+        call_args = {k: v for k, v in args.items() if k != "action" and v is not None}
+        return call_tool(mod, real_tool, call_args, accts)
+
+    if tool_name == "messaging":
+        action = args.get("action", "")
+        lookup = tool_map.get(action)
+        if not lookup:
+            return f"Messaging action '{action}' not available."
+        _, mod, accts = lookup
+        call_args = {k: v for k, v in args.items() if k != "action" and v is not None}
+        return call_tool(mod, action, call_args, accts)
+
+    return f"Unknown tool: {tool_name}"
+
+
+def build_voice_system_prompt(connectors, briefing, memory, prompt_template):
+    """Build the system prompt for voice agent sessions.
+
+    Args:
+        connectors: Dict of loaded connectors
+        briefing: Pre-cached briefing text
+        memory: SessionMemory instance (or None)
+        prompt_template: Template string with {memory}, {services}, {briefing} placeholders
+
+    Returns:
+        Formatted system prompt string
+    """
+    memory_str = memory.format_for_prompt() if memory else "No prior context."
+    services = ", ".join(sorted(connectors.keys())) or "none"
+    return prompt_template.format(
+        memory=memory_str,
+        services=services,
+        briefing=briefing[:800] if briefing else "Not yet loaded.",
+    )

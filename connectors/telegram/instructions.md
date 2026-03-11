@@ -49,6 +49,6 @@ bash install.sh
 
 ```bash
 python3 -m pytest connectors/telegram/test_connector.py -v
-python3 -m agent.runner --provider gemini
-# Ask: "Send me a message on Telegram saying hello"
+bash start.sh
+# Open http://localhost:5173 and ask via voice: "Send me a message on Telegram saying hello"
 ```

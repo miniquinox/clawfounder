@@ -128,12 +128,6 @@ else
     fail "dashboard/server.js missing"
 fi
 
-if [ -f "dashboard/chat_agent.py" ]; then
-    ok "dashboard/chat_agent.py"
-else
-    fail "dashboard/chat_agent.py missing"
-fi
-
 # ── Environment variables ────────────────────────────────────────
 
 section "API Keys (.env)"

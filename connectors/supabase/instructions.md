@@ -40,6 +40,6 @@ bash install.sh
 
 ```bash
 python3 -m pytest connectors/supabase/test_connector.py -v
-python3 -m agent.runner --provider gemini
-# Ask: "How many rows are in my users table?"
+bash start.sh
+# Open http://localhost:5173 and ask via voice: "How many rows are in my users table?"
 ```
