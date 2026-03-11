@@ -11,6 +11,137 @@ const CONNECTOR_META = {
   whatsapp: { emoji: '\ud83d\udcac', label: 'WhatsApp', color: '#25d366' },
 }
 
+function VisionPanel() {
+  const [imageData, setImageData] = useState(null)
+  const [previewUrl, setPreviewUrl] = useState(null)
+  const [analysis, setAnalysis] = useState('')
+  const [prompt, setPrompt] = useState('Analyze this screenshot like my AI PM. What is going on and what should I do next?')
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState(null)
+
+  const handleFile = (file) => {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      setError('Please upload an image file (PNG, JPG, etc.)')
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = (e) => {
+      setImageData(e.target.result)
+      setPreviewUrl(e.target.result)
+      setError(null)
+      setAnalysis('')
+    }
+    reader.readAsDataURL(file)
+  }
+
+  const onDrop = (e) => {
+    e.preventDefault()
+    const file = e.dataTransfer.files?.[0]
+    if (file) handleFile(file)
+  }
+
+  const onDragOver = (e) => {
+    e.preventDefault()
+  }
+
+  const analyze = async () => {
+    if (!imageData) {
+      setError('Add a screenshot first.')
+      return
+    }
+    setLoading(true)
+    setError(null)
+    setAnalysis('')
+    try {
+      const resp = await fetch('/api/vision/analyze', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageData, prompt }),
+      })
+      const data = await resp.json()
+      if (!resp.ok || data.error) {
+        throw new Error(data.error || 'Vision analysis failed')
+      }
+      setAnalysis(data.text || '')
+    } catch (e) {
+      setError(e.message || 'Vision analysis failed')
+    }
+    setLoading(false)
+  }
+
+  return (
+    <div className="mt-10">
+      <div className="flex items-center gap-2 mb-3">
+        <div className="w-8 h-8 rounded-lg bg-accent/20 flex items-center justify-center text-sm">\ud83d\udcf1</div>
+        <div>
+          <h2 className="text-sm font-semibold text-white">Visual Briefing (Screenshots)</h2>
+          <p className="text-xs text-claw-500">Drop in a screenshot of your board, dashboard, or PR and let ClawFounder brief you.</p>
+        </div>
+      </div>
+
+      <div className="grid md:grid-cols-2 gap-4">
+        {/* Upload / preview */}
+        <div
+          onDrop={onDrop}
+          onDragOver={onDragOver}
+          className="rounded-xl border border-dashed border-white/10 bg-white/[0.02] p-4 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent/40 hover:bg-white/[0.04] transition-all"
+          onClick={() => {
+            const input = document.createElement('input')
+            input.type = 'file'
+            input.accept = 'image/*'
+            input.onchange = (e) => {
+              const file = e.target.files?.[0]
+              if (file) handleFile(file)
+            }
+            input.click()
+          }}
+        >
+          {previewUrl ? (
+            <>
+              <img src={previewUrl} alt="Screenshot preview" className="max-h-48 rounded-lg mb-3 border border-white/10 object-contain" />
+              <p className="text-[11px] text-claw-400">Click or drop another image to replace.</p>
+            </>
+          ) : (
+            <>
+              <div className="text-3xl mb-2">\ud83d\udcf7</div>
+              <p className="text-xs text-claw-300 mb-1">Drop a screenshot here, or click to upload</p>
+              <p className="text-[11px] text-claw-500">Kanban boards, analytics dashboards, PR diffs, etc.</p>
+            </>
+          )}
+        </div>
+
+        {/* Prompt + result */}
+        <div className="flex flex-col gap-2">
+          <textarea
+            value={prompt}
+            onChange={(e) => setPrompt(e.target.value)}
+            rows={3}
+            className="w-full bg-white/[0.04] border border-white/10 rounded-lg px-3 py-2 text-xs text-claw-100 placeholder:text-claw-500 focus:outline-none focus:border-accent/40"
+          />
+          <button
+            onClick={analyze}
+            disabled={loading || !imageData}
+            className="self-start px-4 py-2 rounded-lg text-xs font-medium bg-accent/20 text-accent-light hover:bg-accent/30 border border-accent/30 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {loading ? 'Analyzing...' : 'Analyze Screenshot'}
+          </button>
+          {error && (
+            <div className="text-[11px] text-red-400 mt-1">
+              {error}
+            </div>
+          )}
+          {analysis && (
+            <div className="mt-1 rounded-lg border border-white/10 bg-white/[0.02] px-3 py-2 text-xs text-claw-200 max-h-48 overflow-y-auto whitespace-pre-wrap">
+              {analysis}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 const PRIORITY_STYLES = {
   high: { bg: 'bg-red-500/15', text: 'text-red-400', border: 'border-red-500/20', label: 'High' },
   medium: { bg: 'bg-yellow-500/15', text: 'text-yellow-400', border: 'border-yellow-500/20', label: 'Med' },
@@ -695,6 +826,9 @@ export default function BriefingView({ onSwitchToChat }) {
             </div>
           </div>
         )}
+
+        {/* Vision-based briefing */}
+        <VisionPanel />
       </div>
     </main>
   )

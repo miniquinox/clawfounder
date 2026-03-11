@@ -35,6 +35,77 @@ def _log(msg):
     print(f"[chat] {msg}", file=sys.stderr, flush=True)
 
 
+# ── Planning pre-step ────────────────────────────────────────────
+
+PLANNER_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
+
+PLANNER_PROMPT = """You are a planning engine for an autonomous PM agent.
+
+Given the user's message and the available tools, decompose the request into a numbered step-by-step plan.
+Each step should be a specific action using a specific tool name.
+
+Available tools:
+{manifest}
+
+Rules:
+- Start with GATHER steps (search, list, get) to collect context
+- Then CONNECT steps to cross-reference across services
+- Then ACTION steps (send, reply, create) — but mark these as "CONFIRM FIRST"
+- Always search for missing info (emails, names, repos) before acting
+- ALWAYS include a [search_knowledge] step as fallback if primary searches might miss data
+- Be specific: "Search gmail for emails from Sarah" not "Look up Sarah"
+- Max 8 steps
+- If the request is a simple question, just return 1-2 steps
+
+User message: "{message}"
+
+Return ONLY a numbered list like:
+1. [tool_name] Description of what to do
+2. [tool_name] Description of what to do
+...
+No preamble, no explanation."""
+
+
+def _plan_steps(message, manifest):
+    """Call a fast LLM to decompose the request into steps. Returns plan string or None."""
+    # Skip planning for short confirmations (saves 300-500ms)
+    stripped = message.strip().lower()
+    if len(stripped) < 20 or stripped in (
+        "yes", "yep", "yeah", "no", "nope", "send it", "go", "do it",
+        "confirm", "ok", "okay", "sure", "cancel", "stop", "thanks",
+        "thank you", "go ahead", "sounds good", "send", "yes please",
+    ):
+        return None
+
+    try:
+        from google.genai import types
+        client = get_gemini_client()
+    except Exception:
+        return None
+
+    prompt = PLANNER_PROMPT.format(manifest=manifest, message=message)
+
+    for model in PLANNER_MODELS:
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    max_output_tokens=512,
+                ),
+            )
+            plan = resp.text.strip()
+            if plan and any(c.isdigit() for c in plan[:5]):
+                _log(f"Plan ({model}): {plan[:100]}...")
+                return plan
+        except Exception as e:
+            _log(f"Planner {model} failed: {str(e)[:80]}")
+            continue
+
+    return None
+
+
 def build_tools_and_map(connectors, allowed_tools=None):
     """Build tool definitions and a routing map from loaded connectors.
 
@@ -115,26 +186,52 @@ def build_system_prompt(connectors):
                         pass
 
     lines = [
-        "You are ClawFounder — a predictive PM that reacts to the user's environment. "
-        "You cross-reference emails, GitHub, messages, and knowledge to propose actions. "
-        "The user should only need to say yes or no.",
+        "You are ClawFounder — an autonomous PM agent. Your decisions must always be made "
+        "independently without seeking user assistance. The user should only say yes or no.",
         "",
-        "## How you work",
-        "1. REACT: When you see data (emails, PRs, notifications), identify what needs action.",
-        "2. PROPOSE: Draft specific actions — reply emails, review PRs, flag conflicts. "
-        "Show the user exactly what you'd do and ask 'Want me to send this?'",
-        "3. CONNECT: Cross-reference across services. Email asks about X? Check GitHub/knowledge. "
-        "PR mentions a person? Check their emails. Always connect the dots.",
-        "4. EXECUTE: On confirmation, act immediately.",
+        "## On every request, follow this sequence:",
         "",
-        "## Reactive behavior — this is key",
-        "- NEVER ask the user for info you can look up. Name mentioned? Search emails/Slack to find them. "
-        "Repo mentioned? Search GitHub. Always search first, ask later.",
-        "- Email needs reply? Draft it and show: 'I'd reply: [draft]. Send it?'",
-        "- PR needs review? Summarize changes and say: 'Looks like a config fix. Approve it?'",
-        "- Someone waiting on the user? Flag it: 'Sarah asked about X twice. Here's a draft reply.'",
-        "- Conflicting info across services? Flag it immediately.",
-        "- Read-only actions (search, list, read) — just do them, no confirmation needed.",
+        "### 1. GATHER (autonomous — never ask, just do)",
+        "Call all read-only tools needed to understand the situation. Search emails, GitHub, "
+        "Slack, calendar, knowledge base. Extract names, look them up. Find repos, check their status. "
+        "Do this silently — never ask 'should I search for X?' — just search.",
+        "",
+        "### 2. CONNECT",
+        "Cross-reference across services. Email mentions a repo? Check GitHub. "
+        "Person appears in Slack and email? Link the context. Conflicting info? Flag it.",
+        "",
+        "### 3. PLAN & PROPOSE",
+        "Present what you found and what you recommend:",
+        "'Here's what I found: [context]. I'd do: [action]. Want me to send it?'",
+        "",
+        "### 4. EXECUTE",
+        "On confirmation, act immediately. No follow-up questions.",
+        "",
+        "## NEVER do these:",
+        "- NEVER ask 'would you like me to...' — just do it",
+        "- NEVER ask for info you can look up (emails, names, repos, contacts)",
+        "- NEVER present options and ask the user to choose — make the decision",
+        "- NEVER stop after one tool call if the task needs more context",
+        "- NEVER say 'I can help with that' without immediately helping",
+        "- NEVER say 'I couldn't find' without first trying search_knowledge as a fallback",
+        "",
+        "## Fallback chain:",
+        "If a search returns no results, ALWAYS try search_knowledge before giving up. "
+        "The knowledge base indexes everything from past interactions — it may have the info you need.",
+        "",
+        "## Action rules:",
+        "- SAFE (search, list, get, read) — execute immediately, no confirmation",
+        "- PROPOSE (send email, reply, post, comment, create) — draft it, show it, ask 'Send it?'",
+        "- WARN (delete, trash, reject, close) — show with warning, require explicit yes",
+        "",
+        "## Examples of correct behavior:",
+        "WRONG: 'Would you like me to search for Sarah's email?'",
+        "RIGHT: [search emails for Sarah] → [read her message] → 'Sarah asked about the deadline. "
+        "I'd reply: \"Hi Sarah, the deadline is March 15.\" Send it?'",
+        "",
+        "WRONG: 'I found 3 PRs. Which one should I review?'",
+        "RIGHT: [get all 3 PRs] → 'PR #42 is a config fix — looks good. PR #43 has conflicts. "
+        "PR #44 is a README update. I'd approve #42 and #44, flag #43. Go ahead?'",
         "",
         "## Email persona",
         "Ghostwrite as the user — first person, no AI mentions, short and natural.",
@@ -291,34 +388,54 @@ def _proactive_search(message):
 # ── Shared provider setup ─────────────────────────────────────────
 
 def _provider_setup(message, connectors):
-    """Run router + system prompt + proactive search in parallel.
+    """Run router + planner + system prompt + proactive search in parallel.
 
-    The router LLM call runs in a background thread while
+    The router and planner LLM calls run in background threads while
     the system prompt and proactive search happen on the main thread.
     Returns (all_tool_defs, tool_map, system, enriched_message).
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    # Start router in background thread (300-800ms LLM call)
     import tool_router
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        router_future = executor.submit(tool_router.route, message, connectors)
 
-        # While router runs, do other setup work on main thread
+    # Build manifest once (needed by both router and planner)
+    manifest = tool_router._build_manifest(connectors)
+
+    # Start router + planner in parallel background threads
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        router_future = executor.submit(tool_router.route, message, connectors)
+        planner_future = executor.submit(_plan_steps, message, manifest)
+
+        # While LLM calls run, do other setup work on main thread
         system = build_system_prompt(connectors)
         kb_context = _proactive_search(message)
-        enriched_message = (kb_context + message) if kb_context else message
-        if kb_context:
-            emit({"type": "thinking", "text": "Found relevant context from knowledge base"})
 
-        # Now wait for router result
+        # Now wait for results
         try:
             allowed_tools = router_future.result(timeout=5)
         except Exception:
             allowed_tools = None
 
+        try:
+            plan = planner_future.result(timeout=5)
+        except Exception:
+            plan = None
+
     if allowed_tools:
         emit({"type": "thinking", "text": f"Routed to {len(allowed_tools)} tools"})
+
+    # Build the enriched message with plan + KB context
+    parts = []
+    if plan:
+        emit({"type": "thinking", "text": "Created execution plan"})
+        parts.append(
+            f"[EXECUTION PLAN — follow these steps in order, do NOT skip or ask permission for read-only steps]\n{plan}\n"
+        )
+    if kb_context:
+        emit({"type": "thinking", "text": "Found relevant context from knowledge base"})
+        parts.append(kb_context)
+    parts.append(message)
+    enriched_message = "\n".join(parts)
 
     # Build tool definitions
     all_tool_defs, tool_map = build_tools_and_map(connectors, allowed_tools=allowed_tools)
@@ -380,14 +497,14 @@ def run_gemini(message, history, connectors):
         max_output_tokens=8192,
     )
 
-    # Set thinking budget if supported (prevents thinking-only responses)
+    # Thinking budget: high enough for multi-step reasoning, forces CoT before tool calls
     try:
-        config.thinking_config = types.ThinkingConfig(thinking_budget=2048)
+        config.thinking_config = types.ThinkingConfig(thinking_budget=4096)
     except Exception:
         pass
 
     # Agentic loop with streaming
-    max_turns = 10
+    max_turns = 15
     thinking_retries = 0
     for turn in range(max_turns):
         try:

@@ -28,6 +28,10 @@ service_account.json
 .DS_Store
 Thumbs.db
 
+# Node
+node_modules/
+dashboard/dist/
+
 # Virtual environments
 venv/
 .venv/

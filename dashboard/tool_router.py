@@ -95,9 +95,12 @@ def _call_router(message, manifest):
                 text = text.strip()
 
             tools = json.loads(text)
-            if isinstance(tools, list) and all(isinstance(t, str) for t in tools):
+            if isinstance(tools, list) and all(isinstance(t, str) for t in tools) and len(tools) > 0:
                 _log(f"Routed ({model}): {len(tools)} tools")
                 return tools
+            elif isinstance(tools, list) and len(tools) == 0:
+                _log(f"{model} returned empty array, treating as failure")
+                continue
 
         except Exception as e:
             _log(f"{model} failed: {str(e)[:80]}")
@@ -129,23 +132,19 @@ def _fallback(connectors):
                 if suffix in core_suffixes or suffix in list_suffixes:
                     allowed.add(name)
 
-    # Hard cap — if still too many, keep small connector tools + trim large ones
+    # Hard cap — enforce MAX_TOOLS limit
     if len(allowed) > MAX_TOOLS:
-        _log(f"Fallback over cap ({len(allowed)}), trimming")
-        small_tools = set()
-        large_tools = set()
-        for conn_name, info in connectors.items():
-            tools_in = {t["name"] for t in info["module"].TOOLS if t["name"] in allowed}
-            if len(info["module"].TOOLS) <= 12:
-                small_tools.update(tools_in)
-            else:
-                large_tools.update(tools_in)
-        # Keep all small connector tools, trim large connector tools
-        allowed = small_tools
-        for t in sorted(large_tools):
-            if len(allowed) >= MAX_TOOLS:
+        _log(f"Fallback over cap ({len(allowed)}), trimming to {MAX_TOOLS}")
+        # Prioritize: read-only tools first, then action tools
+        read_keywords = ("get", "list", "search", "read", "notifications", "query")
+        read_tools = sorted(t for t in allowed if any(k in t for k in read_keywords))
+        action_tools = sorted(t for t in allowed if t not in read_tools)
+        trimmed = set()
+        for t in read_tools + action_tools:
+            if len(trimmed) >= MAX_TOOLS:
                 break
-            allowed.add(t)
+            trimmed.add(t)
+        allowed = trimmed
 
     _log(f"Fallback: {len(allowed)} tools")
     return allowed

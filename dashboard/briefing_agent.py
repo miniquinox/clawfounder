@@ -305,9 +305,13 @@ def _analyze_gemini(data_text, system_prompt):
             system_instruction=system_prompt,
             temperature=0.3,
             max_output_tokens=4096,
+            response_mime_type="application/json",
         ),
     )
-    return _parse_tasks(response.text)
+    text = response.text
+    if not text:
+        raise RuntimeError("Gemini returned empty response")
+    return _parse_tasks(text)
 
 
 def _analyze_openai(data_text, system_prompt):
@@ -399,7 +403,9 @@ def _parse_tasks(text):
         except json.JSONDecodeError:
             pass
 
-    emit({"type": "error", "error": "Failed to parse LLM response as JSON"})
+    _log = lambda m: print(f"[briefing] {m}", file=sys.stderr, flush=True)
+    _log(f"JSON parse failed. Raw text (first 500 chars): {text[:500]}")
+    emit({"type": "error", "error": f"Failed to parse LLM response as JSON. Got: {text[:100]}..."})
     return []
 
 

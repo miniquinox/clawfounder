@@ -1,14 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 
-const CONNECTOR_META = {
-  gmail: { emoji: '\ud83d\udce7', label: 'Gmail', color: '#ea4335' },
-  work_email: { emoji: '\ud83d\udcbc', label: 'Work Email', color: '#4285f4' },
-  telegram: { emoji: '\ud83d\udcac', label: 'Telegram', color: '#26a5e4' },
+const TOOL_META = {
+  email: { emoji: '\ud83d\udce7', label: 'Email', color: '#ea4335' },
   github: { emoji: '\ud83d\udc19', label: 'GitHub', color: '#8b5cf6' },
-  supabase: { emoji: '\u26a1', label: 'Supabase', color: '#3ecf8e' },
-  firebase: { emoji: '\ud83d\udd25', label: 'Firebase', color: '#ffca28' },
-  yahoo_finance: { emoji: '\ud83d\udcc8', label: 'Yahoo Finance', color: '#7b61ff' },
-  whatsapp: { emoji: '\ud83d\udcac', label: 'WhatsApp', color: '#25d366' },
+  calendar: { emoji: '\ud83d\udcc5', label: 'Calendar', color: '#4285f4' },
+  messaging: { emoji: '\ud83d\udcac', label: 'Messaging', color: '#e01e5a' },
+  finance: { emoji: '\ud83d\udcc8', label: 'Finance', color: '#7b61ff' },
+  get_briefing: { emoji: '\ud83d\udcca', label: 'Briefing', color: '#7f56d9' },
+  search_knowledge: { emoji: '\ud83e\udde0', label: 'Knowledge', color: '#7f56d9' },
+  save_knowledge: { emoji: '\ud83d\udcbe', label: 'Saving', color: '#7f56d9' },
+  show_draft: { emoji: '\ud83d\udcdd', label: 'Draft', color: '#f59e0b' },
 }
 
 // Audio playback queue with interrupt support
@@ -24,7 +25,7 @@ function createAudioPlayer() {
     },
     play(base64Data) {
       const ctx = this.init()
-      // Decode base64 → Int16 → Float32
+      // Decode base64 -> Int16 -> Float32
       const binary = atob(base64Data)
       const bytes = new Uint8Array(binary.length)
       for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
@@ -38,30 +39,23 @@ function createAudioPlayer() {
       source.buffer = buffer
       source.connect(ctx.destination)
 
-      // Schedule sequentially so chunks don't overlap
       const now = ctx.currentTime
       if (nextStartTime < now) nextStartTime = now
       source.start(nextStartTime)
       nextStartTime += buffer.duration
 
-      // Track active sources for interrupt
       activeSources.push(source)
       source.onended = () => {
         activeSources = activeSources.filter(s => s !== source)
       }
-
       return source
     },
     stop() {
-      // Immediately stop all playing/queued audio
       for (const source of activeSources) {
         try { source.stop() } catch {}
       }
       activeSources = []
       nextStartTime = 0
-    },
-    reset() {
-      this.stop()
     },
     close() {
       this.stop()
@@ -74,15 +68,22 @@ export default function VoiceView() {
   const [status, setStatus] = useState('idle') // idle | connecting | listening | speaking | error
   const [transcript, setTranscript] = useState([])
   const [toolEvents, setToolEvents] = useState([])
+  const [actionCards, setActionCards] = useState([])
   const [errorMsg, setErrorMsg] = useState(null)
   const wsRef = useRef(null)
   const captureCtxRef = useRef(null)
   const streamRef = useRef(null)
   const workletNodeRef = useRef(null)
   const playerRef = useRef(createAudioPlayer())
+  const userStoppedRef = useRef(false)
+  const transcriptEndRef = useRef(null)
+
+  // Auto-scroll transcript
+  useEffect(() => {
+    transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [transcript])
 
   const cleanup = useCallback(() => {
-    // Stop mic
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop())
       streamRef.current = null
@@ -95,44 +96,45 @@ export default function VoiceView() {
       captureCtxRef.current.close()
       captureCtxRef.current = null
     }
-    // Close WebSocket
     if (wsRef.current) {
       try { wsRef.current.close() } catch {}
       wsRef.current = null
     }
-    // Close audio player
     playerRef.current.close()
     playerRef.current = createAudioPlayer()
   }, [])
 
-  // Cleanup on unmount
   useEffect(() => cleanup, [cleanup])
 
   const startVoice = async () => {
+    userStoppedRef.current = false
     setStatus('connecting')
     setTranscript([])
     setToolEvents([])
+    setActionCards([])
     setErrorMsg(null)
 
     try {
-      // 1. Connect WebSocket
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
       const ws = new WebSocket(`${protocol}//${window.location.host}/ws/voice`)
       wsRef.current = ws
 
       ws.onclose = () => {
-        if (status !== 'idle') {
-          setStatus('idle')
+        if (userStoppedRef.current) {
           cleanup()
+          setStatus('idle')
+        } else if (wsRef.current) {
+          // Unexpected close — reconnect
+          console.log('[voice] Unexpected close, reconnecting...')
+          cleanup()
+          setStatus('connecting')
+          setTimeout(() => startVoice(), 1500)
         }
       }
       ws.onerror = () => {
-        setErrorMsg('WebSocket connection failed')
-        setStatus('error')
-        cleanup()
+        // onclose fires after onerror
       }
 
-      // 2. Handle incoming messages
       ws.onmessage = (event) => {
         try {
           const msg = JSON.parse(event.data)
@@ -144,7 +146,6 @@ export default function VoiceView() {
             playerRef.current.play(msg.data)
           } else if (msg.type === 'transcript') {
             setTranscript(prev => {
-              // Merge consecutive same-role transcripts
               const last = prev[prev.length - 1]
               if (last && last.role === msg.role && !last.final) {
                 return [...prev.slice(0, -1), { ...last, text: last.text + msg.text }]
@@ -152,34 +153,35 @@ export default function VoiceView() {
               return [...prev, { role: msg.role, text: msg.text }]
             })
           } else if (msg.type === 'text') {
-            setTranscript(prev => [...prev, { role: 'assistant', text: msg.text, final: true }])
+            setTranscript(prev => [...prev, { role: 'system', text: msg.text, final: true }])
           } else if (msg.type === 'tool_call') {
-            const connName = msg.name?.split('_')[0] || 'unknown'
-            setToolEvents(prev => [...prev, { ...msg, connector: connName, done: false }])
+            setToolEvents(prev => [...prev, { ...msg, done: false }])
           } else if (msg.type === 'tool_result') {
             setToolEvents(prev =>
               prev.map(e => e.id === msg.id ? { ...e, done: true } : e)
             )
+            if (msg.card) {
+              setActionCards(prev => [...prev.slice(-4), { id: msg.id, ...msg.card }])
+            }
           } else if (msg.type === 'turn_complete') {
             setStatus('listening')
-            playerRef.current.reset()
+            playerRef.current.stop()
           } else if (msg.type === 'interrupted') {
             setStatus('listening')
-            playerRef.current.reset()
+            playerRef.current.stop()
           } else if (msg.type === 'error') {
             setErrorMsg(msg.error)
             setStatus('error')
           }
-        } catch {}
+        } catch (e) { console.warn('[voice] Bad message:', e) }
       }
 
-      // Wait for WebSocket to open
       await new Promise((resolve, reject) => {
         ws.onopen = resolve
-        setTimeout(() => reject(new Error('Connection timeout')), 10000)
+        setTimeout(() => reject(new Error('Connection timeout')), 20000)
       })
 
-      // 3. Set up mic capture
+      // Set up mic capture
       const captureCtx = new AudioContext({ sampleRate: 16000 })
       captureCtxRef.current = captureCtx
 
@@ -194,7 +196,6 @@ export default function VoiceView() {
       })
       streamRef.current = stream
 
-      // Try AudioWorklet, fall back to ScriptProcessor
       try {
         await captureCtx.audioWorklet.addModule('/audio-processor.js')
         const source = captureCtx.createMediaStreamSource(stream)
@@ -212,7 +213,6 @@ export default function VoiceView() {
         source.connect(worklet)
         worklet.connect(captureCtx.destination)
       } catch {
-        // Fallback: ScriptProcessorNode
         const source = captureCtx.createMediaStreamSource(stream)
         const processor = captureCtx.createScriptProcessor(4096, 1, 1)
         processor.onaudioprocess = (e) => {
@@ -238,6 +238,7 @@ export default function VoiceView() {
   }
 
   const stopVoice = () => {
+    userStoppedRef.current = true
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'end' }))
     }
@@ -250,11 +251,10 @@ export default function VoiceView() {
   return (
     <div className="flex-1 flex flex-col overflow-hidden">
       {/* Main voice area */}
-      <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4">
+      <div className="flex-1 flex flex-col items-center justify-center px-6 pb-4 min-h-0">
 
         {/* Voice orb */}
         <div className="relative mb-8">
-          {/* Outer pulse ring */}
           {status === 'listening' && (
             <div className="absolute inset-0 -m-4 rounded-full bg-accent/20 animate-ping" style={{ animationDuration: '2s' }} />
           )}
@@ -282,9 +282,9 @@ export default function VoiceView() {
             {status === 'connecting' ? (
               <span className="animate-spin text-2xl">&#9696;</span>
             ) : isActive ? (
-              <span className="text-2xl">&#9632;</span> // stop square
+              <span className="text-2xl">&#9632;</span>
             ) : (
-              <span>&#127908;</span> // mic
+              <span>&#127908;</span>
             )}
           </button>
         </div>
@@ -293,26 +293,20 @@ export default function VoiceView() {
         <div className="text-sm text-claw-400 mb-6 h-5">
           {status === 'idle' && 'Click to start voice chat'}
           {status === 'connecting' && 'Connecting to Gemini Live...'}
-          {status === 'listening' && (
-            <span className="text-accent-light">Listening...</span>
-          )}
-          {status === 'speaking' && (
-            <span className="text-accent-light">ClawFounder is speaking...</span>
-          )}
-          {status === 'error' && (
-            <span className="text-red-400">{errorMsg || 'Connection error'}</span>
-          )}
+          {status === 'listening' && <span className="text-accent-light">Listening...</span>}
+          {status === 'speaking' && <span className="text-accent-light">Speaking...</span>}
+          {status === 'error' && <span className="text-red-400">{errorMsg || 'Connection error'}</span>}
         </div>
 
         {/* Tool activity */}
         {toolEvents.length > 0 && (
           <div className="w-full max-w-md mb-4 space-y-1.5">
-            {toolEvents.slice(-5).map((e, i) => {
-              const meta = CONNECTOR_META[e.connector] || { emoji: '\ud83d\udd27', label: e.connector, color: '#7f56d9' }
+            {toolEvents.slice(-3).map((e, i) => {
+              const meta = TOOL_META[e.name] || { emoji: '\ud83d\udd27', label: e.name, color: '#7f56d9' }
               return (
                 <div key={i} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/5">
                   <span className="text-xs">{meta.emoji}</span>
-                  <span className="text-[11px] text-claw-300 flex-1 truncate">{e.name}</span>
+                  <span className="text-[11px] text-claw-300 flex-1 truncate">{meta.label}</span>
                   {e.done
                     ? <span className="text-[10px] text-green-400">Done</span>
                     : <span className="text-[10px] text-accent-light animate-pulse">Working...</span>
@@ -324,29 +318,165 @@ export default function VoiceView() {
         )}
       </div>
 
-      {/* Transcript */}
-      {transcript.length > 0 && (
-        <div className="border-t border-white/5 max-h-[40vh] overflow-y-auto px-6 py-4 space-y-3">
-          <div className="text-[10px] text-claw-600 uppercase tracking-wider mb-2">Transcript</div>
-          {transcript.map((t, i) => (
-            <div key={i} className={`text-sm leading-relaxed ${
-              t.role === 'user' ? 'text-claw-300' : 'text-claw-100'
-            }`}>
-              <span className={`text-[10px] font-medium mr-2 ${
-                t.role === 'user' ? 'text-claw-500' : 'text-accent-light'
-              }`}>
-                {t.role === 'user' ? 'You' : 'ClawFounder'}
-              </span>
-              {t.text}
-            </div>
+      {/* Action Cards — pinned above transcript, always visible */}
+      {actionCards.length > 0 && (
+        <div className="border-t border-white/5 px-6 py-3 space-y-3 max-h-[35vh] overflow-y-auto shrink-0">
+          {actionCards.map((card, i) => (
+            <ActionCard key={card.id || i} card={card} />
           ))}
+        </div>
+      )}
+
+      {/* Transcript — scrollable bottom section */}
+      {transcript.length > 0 && (
+        <div className={`border-t border-white/5 ${actionCards.length === 0 ? '' : 'border-t-0'} max-h-[30vh] overflow-y-auto px-6 py-3 shrink-0`}>
+          <div className="space-y-2">
+            <div className="text-[10px] text-claw-600 uppercase tracking-wider">Transcript</div>
+            {transcript.map((t, i) => (
+              <div key={i} className={`text-sm leading-relaxed ${
+                t.role === 'user' ? 'text-claw-300' : t.role === 'system' ? 'text-claw-500 text-xs' : 'text-claw-100'
+              }`}>
+                {t.role !== 'system' && (
+                  <span className={`text-[10px] font-medium mr-2 ${
+                    t.role === 'user' ? 'text-claw-500' : 'text-accent-light'
+                  }`}>
+                    {t.role === 'user' ? 'You' : 'ClawFounder'}
+                  </span>
+                )}
+                {t.text}
+              </div>
+            ))}
+            <div ref={transcriptEndRef} />
+          </div>
         </div>
       )}
     </div>
   )
 }
 
-// Utility: ArrayBuffer → base64
+// ── Action Card components ───────────────────────────────────────
+
+function ActionCard({ card }) {
+  if (card.type === 'email_draft') return <DraftCard card={card} />
+  if (card.type === 'email') return <EmailCard card={card} />
+  if (card.type === 'email_list') return <EmailListCard card={card} />
+  if (card.type === 'email_sent') return <SentCard card={card} />
+  if (card.type === 'event_list') return <EventListCard card={card} />
+  if (card.type === 'github_list') return <GithubListCard card={card} />
+  return null
+}
+
+function DraftCard({ card }) {
+  return (
+    <div className="rounded-xl border-2 border-amber-500/30 bg-amber-500/5 p-5 space-y-3 animate-in fade-in">
+      <div className="flex items-center gap-2">
+        <span className="text-base">{'\ud83d\udcdd'}</span>
+        <span className="text-xs font-semibold text-amber-300 uppercase tracking-wider">Draft — Review Before Sending</span>
+      </div>
+      <div className="space-y-2 bg-black/20 rounded-lg p-4">
+        <div className="flex gap-2 text-xs">
+          <span className="text-claw-500 w-10 shrink-0">To:</span>
+          <span className="text-claw-200">{card.to_name ? `${card.to_name} <${card.to}>` : card.to}</span>
+        </div>
+        <div className="flex gap-2 text-xs">
+          <span className="text-claw-500 w-10 shrink-0">Subj:</span>
+          <span className="text-claw-100 font-medium">{card.subject}</span>
+        </div>
+        <div className="border-t border-white/5 mt-2 pt-2">
+          <div className="text-xs text-claw-200 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto">
+            {card.body}
+          </div>
+        </div>
+      </div>
+      <div className="text-[10px] text-amber-400/70 italic">
+        Say &quot;send it&quot; to approve or &quot;change it&quot; to edit
+      </div>
+    </div>
+  )
+}
+
+function EmailCard({ card }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-4 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-sm">{'\ud83d\udce7'}</span>
+        <span className="text-xs font-medium text-claw-200 flex-1 truncate">{card.subject}</span>
+      </div>
+      <div className="flex gap-4 text-[10px] text-claw-400">
+        <span>From: {card.from}</span>
+        <span>{card.date}</span>
+      </div>
+      <div className="text-xs text-claw-300 leading-relaxed whitespace-pre-wrap max-h-32 overflow-y-auto">
+        {card.body}
+      </div>
+    </div>
+  )
+}
+
+function EmailListCard({ card }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3 space-y-1.5">
+      <div className="text-[10px] text-claw-500 uppercase tracking-wider">
+        {card.total} email{card.total !== 1 ? 's' : ''}
+      </div>
+      {card.emails.map((e, i) => (
+        <div key={i} className="flex items-start gap-2 py-1.5 border-t border-white/5 first:border-0">
+          <span className="text-[10px] mt-0.5">{'\ud83d\udce7'}</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs text-claw-200 truncate">{e.subject}</div>
+            <div className="text-[10px] text-claw-400 truncate">{e.from}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function SentCard({ card }) {
+  return (
+    <div className="rounded-xl border border-green-500/20 bg-green-500/5 px-4 py-3 flex items-center gap-2">
+      <span className="text-green-400 text-sm">{'\u2713'}</span>
+      <span className="text-xs text-green-300">{card.message}</span>
+    </div>
+  )
+}
+
+function EventListCard({ card }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3 space-y-1.5">
+      <div className="text-[10px] text-claw-500 uppercase tracking-wider">Calendar</div>
+      {card.events.map((e, i) => (
+        <div key={i} className="flex items-center gap-2 py-1.5 border-t border-white/5 first:border-0">
+          <span className="text-[10px]">{'\ud83d\udcc5'}</span>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs text-claw-200 truncate">{e.summary}</div>
+            <div className="text-[10px] text-claw-400">{e.start}{e.location ? ` \u00b7 ${e.location}` : ''}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function GithubListCard({ card }) {
+  return (
+    <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3 space-y-1.5">
+      <div className="text-[10px] text-claw-500 uppercase tracking-wider">GitHub</div>
+      {card.items.map((item, i) => (
+        <div key={i} className="flex items-center gap-2 py-1.5 border-t border-white/5 first:border-0">
+          <span className={`text-[10px] ${item.state === 'open' ? 'text-green-400' : 'text-claw-400'}`}>
+            {item.state === 'open' ? '\u25cf' : '\u25cb'}
+          </span>
+          <div className="flex-1 min-w-0">
+            <div className="text-xs text-claw-200 truncate">#{item.number} {item.title}</div>
+            {item.author && <div className="text-[10px] text-claw-400">{item.author}</div>}
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function arrayBufferToBase64(buffer) {
   const bytes = new Uint8Array(buffer)
   let binary = ''

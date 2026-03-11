@@ -801,6 +801,23 @@ def search(query, connector=None, max_results=None):
     except Exception:
         pass
 
+    # Phase 3: User notes search
+    try:
+        notes = search_notes(query)
+        for note in notes:
+            results.append({
+                "connector": "user_notes",
+                "tool": "note",
+                "source_id": f"note_{note['id']}",
+                "date": note.get("updated_at", ""),
+                "title": note.get("title", "User Note"),
+                "snippet": note.get("content", "")[:300],
+                "metadata": {"tags": note.get("tags", [])},
+                "account": "",
+            })
+    except Exception:
+        pass
+
     # Sort by date, cap at max_results
     results.sort(key=lambda r: r.get("date", ""), reverse=True)
     results = results[:max_results]
@@ -1080,3 +1097,184 @@ def clear():
     except Exception:
         pass
     db.commit()
+
+
+# ── User Notes ────────────────────────────────────────────────────
+# Unstructured content the user adds manually. Stored alongside the
+# auto-indexed knowledge and included in search results so the PM
+# can reference them preemptively.
+
+_NOTES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_notes (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    title      TEXT NOT NULL DEFAULT '',
+    content    TEXT NOT NULL,
+    tags       TEXT DEFAULT '[]',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+
+def _ensure_notes_table():
+    """Create user_notes table if it doesn't exist."""
+    db = _get_db()
+    db.executescript(_NOTES_SCHEMA)
+    # Also add notes to FTS if possible
+    try:
+        db.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
+                title, content, tags,
+                content='user_notes', content_rowid='id',
+                tokenize='porter unicode61'
+            )
+        """)
+    except sqlite3.OperationalError:
+        pass  # FTS5 not available
+
+
+def add_note(content, title="", tags=None):
+    """Add a user note. Returns the new note dict."""
+    _ensure_notes_table()
+    db = _get_db()
+    tags_json = json.dumps(tags or [])
+    cursor = db.execute(
+        "INSERT INTO user_notes (title, content, tags) VALUES (?, ?, ?)",
+        (title, content, tags_json),
+    )
+    note_id = cursor.lastrowid
+    # Update FTS
+    try:
+        db.execute(
+            "INSERT INTO notes_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)",
+            (note_id, title, content, " ".join(tags or [])),
+        )
+    except Exception:
+        pass
+    db.commit()
+    return get_note(note_id)
+
+
+def update_note(note_id, content=None, title=None, tags=None):
+    """Update an existing note. Returns the updated note dict or None."""
+    _ensure_notes_table()
+    db = _get_db()
+
+    existing = db.execute("SELECT id FROM user_notes WHERE id = ?", (note_id,)).fetchone()
+    if not existing:
+        return None
+
+    updates = ["updated_at = datetime('now')"]
+    params = []
+    if content is not None:
+        updates.append("content = ?")
+        params.append(content)
+    if title is not None:
+        updates.append("title = ?")
+        params.append(title)
+    if tags is not None:
+        updates.append("tags = ?")
+        params.append(json.dumps(tags))
+
+    params.append(note_id)
+    db.execute(f"UPDATE user_notes SET {', '.join(updates)} WHERE id = ?", params)
+
+    # Rebuild FTS entry
+    try:
+        db.execute("DELETE FROM notes_fts WHERE rowid = ?", (note_id,))
+        row = db.execute("SELECT title, content, tags FROM user_notes WHERE id = ?", (note_id,)).fetchone()
+        if row:
+            tag_list = json.loads(row[2]) if row[2] else []
+            db.execute(
+                "INSERT INTO notes_fts (rowid, title, content, tags) VALUES (?, ?, ?, ?)",
+                (note_id, row[0], row[1], " ".join(tag_list)),
+            )
+    except Exception:
+        pass
+    db.commit()
+    return get_note(note_id)
+
+
+def delete_note(note_id):
+    """Delete a user note. Returns True if deleted."""
+    _ensure_notes_table()
+    db = _get_db()
+    try:
+        db.execute("DELETE FROM notes_fts WHERE rowid = ?", (note_id,))
+    except Exception:
+        pass
+    cursor = db.execute("DELETE FROM user_notes WHERE id = ?", (note_id,))
+    db.commit()
+    return cursor.rowcount > 0
+
+
+def get_note(note_id):
+    """Get a single note by ID."""
+    _ensure_notes_table()
+    db = _get_db()
+    row = db.execute(
+        "SELECT id, title, content, tags, created_at, updated_at FROM user_notes WHERE id = ?",
+        (note_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return _format_note(row)
+
+
+def list_notes():
+    """List all user notes, newest first."""
+    _ensure_notes_table()
+    db = _get_db()
+    rows = db.execute(
+        "SELECT id, title, content, tags, created_at, updated_at FROM user_notes ORDER BY updated_at DESC"
+    ).fetchall()
+    return [_format_note(r) for r in rows]
+
+
+def search_notes(query):
+    """Search user notes via FTS. Returns list of note dicts."""
+    _ensure_notes_table()
+    db = _get_db()
+    results = []
+
+    # FTS search
+    try:
+        fts_query = _fts5_escape(query)
+        rows = db.execute("""
+            SELECT un.id, un.title, un.content, un.tags, un.created_at, un.updated_at
+            FROM notes_fts
+            JOIN user_notes un ON notes_fts.rowid = un.id
+            WHERE notes_fts MATCH ?
+            ORDER BY rank LIMIT 20
+        """, (fts_query,)).fetchall()
+        results.extend(_format_note(r) for r in rows)
+    except Exception:
+        pass
+
+    # Fallback: LIKE search
+    if not results:
+        rows = db.execute(
+            "SELECT id, title, content, tags, created_at, updated_at FROM user_notes "
+            "WHERE title LIKE ? OR content LIKE ? ORDER BY updated_at DESC LIMIT 20",
+            (f"%{query}%", f"%{query}%"),
+        ).fetchall()
+        results.extend(_format_note(r) for r in rows)
+
+    return results
+
+
+def _format_note(row):
+    """Format a user_notes row into a dict."""
+    tags = []
+    try:
+        tags = json.loads(row[3]) if row[3] else []
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return {
+        "id": row[0],
+        "title": row[1] or "",
+        "content": row[2] or "",
+        "tags": tags,
+        "created_at": row[4],
+        "updated_at": row[5],
+    }

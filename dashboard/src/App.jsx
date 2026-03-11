@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import ChatView from './ChatView'
 import BriefingView from './BriefingView'
 import VoiceView from './VoiceView'
+import NotesView from './NotesView'
 import SetupWizard from './SetupWizard'
 
 const CONNECTOR_META = {
@@ -1337,6 +1338,15 @@ export default function App() {
             >
               <span>🎙️</span> Voice
             </button>
+            <button
+              onClick={() => setTab('notes')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
+                ${tab === 'notes'
+                  ? 'bg-accent/20 text-accent-light shadow-sm'
+                  : 'text-claw-400 hover:text-claw-200'}`}
+            >
+              <span>📚</span> Notes
+            </button>
           </div>
         </div>
       </header>
@@ -1356,6 +1366,9 @@ export default function App() {
 
       {/* Voice Tab */}
       {tab === 'voice' && <VoiceView />}
+
+      {/* Notes Tab */}
+      {tab === 'notes' && <NotesView />}
 
       {/* Connect Tab */}
       {tab === 'connect' && (

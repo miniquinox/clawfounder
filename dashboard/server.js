@@ -1452,6 +1452,67 @@ app.post('/api/briefing', (req, res) => {
     });
 });
 
+// ── Vision analysis endpoint (Gemini multimodal) ─────────────────
+
+app.post('/api/vision/analyze', (req, res) => {
+    try {
+        const { image, prompt } = req.body || {};
+        if (!image) {
+            return res.status(400).json({ error: "Missing 'image' field" });
+        }
+
+        const envVars = { ...process.env, ...readEnv() };
+        const pyScript = path.join(__dirname, 'vision_agent.py');
+        const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+        const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+        const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython : fs.existsSync(venvPython) ? venvPython : 'python3';
+
+        const proc = spawn(pythonCmd, [pyScript], {
+            cwd: PROJECT_ROOT,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: envVars,
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', (data) => {
+            stdout += data.toString();
+        });
+
+        proc.stderr.on('data', (data) => {
+            stderr += data.toString();
+        });
+
+        proc.on('close', (code) => {
+            if (stderr.trim()) {
+                console.error('[vision stderr]', stderr.trim());
+            }
+            if (code !== 0) {
+                return res.status(500).json({ error: `Vision agent exited with code ${code}` });
+            }
+            try {
+                const line = stdout.trim().split('\n').filter(Boolean).pop() || '{}';
+                const parsed = JSON.parse(line);
+                if (parsed.error) {
+                    return res.status(500).json({ error: parsed.error });
+                }
+                return res.json({ text: parsed.text || '' });
+            } catch (e) {
+                console.error('[vision] Parse error:', e.message);
+                return res.status(500).json({ error: 'Failed to parse vision agent output' });
+            }
+        });
+
+        // Send the request payload to the vision agent
+        proc.stdin.write(JSON.stringify({ image, prompt: prompt || '' }));
+        proc.stdin.end();
+    } catch (err) {
+        console.error('[vision] Unexpected error:', err);
+        res.status(500).json({ error: err.message || 'Unexpected error' });
+    }
+});
+
 // ── SPA fallback — serve index.html for non-API routes ──────────
 if (fs.existsSync(DIST_DIR)) {
     app.get('/{*path}', (req, res, next) => {
@@ -1465,6 +1526,85 @@ const PORT = process.env.PORT || 3001;
 const server = app.listen(PORT, '0.0.0.0', () => {
     ensureAccountsRegistry();
     console.log(`🦀 ClawFounder API running on http://0.0.0.0:${PORT}`);
+});
+
+// ── User Notes (Knowledge Base) ──────────────────────────────────
+// Simple CRUD for user-added unstructured content that feeds into
+// the knowledge base search so the PM can reference it.
+
+function runKBPython(code, inputData) {
+    const uvVenvPython = path.join(PROJECT_ROOT, '.venv', 'bin', 'python3');
+    const venvPython = path.join(PROJECT_ROOT, 'venv', 'bin', 'python3');
+    const pythonCmd = fs.existsSync(uvVenvPython) ? uvVenvPython
+        : fs.existsSync(venvPython) ? venvPython : 'python3';
+
+    const envVars = { ...process.env, ...readEnv() };
+    const result = execSync(pythonCmd + ' -', {
+        cwd: path.join(__dirname),
+        env: envVars,
+        encoding: 'utf-8',
+        timeout: 10000,
+        input: code,
+    });
+    return result.trim();
+}
+
+app.get('/api/notes', (req, res) => {
+    try {
+        const out = runKBPython(
+            'import json, sys; sys.path.insert(0, "."); import knowledge_base; print(json.dumps(knowledge_base.list_notes(), default=str))'
+        );
+        res.json({ notes: JSON.parse(out) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/notes', express.json(), (req, res) => {
+    const { content, title, tags } = req.body;
+    if (!content) return res.status(400).json({ error: 'content is required' });
+    try {
+        const argsB64 = Buffer.from(JSON.stringify({ content, title: title || '', tags: tags || [] })).toString('base64');
+        const out = runKBPython(
+            `import json, sys, base64; sys.path.insert(0, "."); import knowledge_base\n` +
+            `args = json.loads(base64.b64decode("${argsB64}").decode())\n` +
+            `print(json.dumps(knowledge_base.add_note(**args), default=str))`
+        );
+        res.json({ note: JSON.parse(out) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.put('/api/notes/:id', express.json(), (req, res) => {
+    const { content, title, tags } = req.body;
+    const noteId = parseInt(req.params.id);
+    try {
+        const argsB64 = Buffer.from(JSON.stringify({ note_id: noteId, content, title, tags })).toString('base64');
+        const out = runKBPython(
+            `import json, sys, base64; sys.path.insert(0, "."); import knowledge_base\n` +
+            `args = json.loads(base64.b64decode("${argsB64}").decode())\n` +
+            `result = knowledge_base.update_note(**args)\n` +
+            `print(json.dumps(result, default=str) if result else "null")`
+        );
+        const note = JSON.parse(out);
+        if (!note) return res.status(404).json({ error: 'Note not found' });
+        res.json({ note });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.delete('/api/notes/:id', (req, res) => {
+    const noteId = parseInt(req.params.id);
+    try {
+        const out = runKBPython(
+            `import json, sys; sys.path.insert(0, "."); import knowledge_base; print(json.dumps(knowledge_base.delete_note(${noteId})))`
+        );
+        res.json({ deleted: JSON.parse(out) });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // ── Voice WebSocket (Gemini Live API bridge) ────────────────────
@@ -1506,10 +1646,18 @@ wss.on('connection', (ws) => {
     }) + '\n');
 
     // Browser → Python: forward audio/control messages
+    let audioMsgCount = 0;
     ws.on('message', (data) => {
         if (!procAlive) return;
         try {
             const msg = JSON.parse(data.toString());
+            if (msg.type === 'audio') {
+                audioMsgCount++;
+                if (audioMsgCount === 1) console.log('[voice] First audio chunk from browser');
+                if (audioMsgCount % 200 === 0) console.log(`[voice] Audio chunks forwarded: ${audioMsgCount}`);
+            } else {
+                console.log(`[voice] Browser → Python: ${msg.type}`);
+            }
             proc.stdin.write(JSON.stringify(msg) + '\n');
         } catch (e) {
             console.error('[voice] Bad message from client:', e.message);
