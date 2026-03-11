@@ -296,6 +296,34 @@ def _truncate_snippet(text, length=None):
     return str(text)[:length]
 
 
+# Senders that produce low-value noise in the knowledge base
+_JUNK_SENDERS = {
+    "linkedin", "noreply", "no-reply", "notifications", "newsletter",
+    "mailer-daemon", "postmaster", "marketing", "promotions", "alerts",
+    "digest", "updates", "donotreply", "do-not-reply", "jobalerts",
+    "info@", "support@", "hello@", "team@", "news@",
+}
+
+def _is_junk_email(email_dict):
+    """Filter out newsletters, job alerts, and automated emails."""
+    from_field = email_dict.get("from", "").lower()
+    subject = email_dict.get("subject", "").lower()
+
+    # Check sender against junk patterns
+    for pattern in _JUNK_SENDERS:
+        if pattern in from_field:
+            return True
+
+    # Skip common automated email subjects
+    junk_subjects = ("unsubscribe", "your daily digest", "job alert", "new jobs",
+                     "your weekly", "newsletter", "verify your email")
+    for js in junk_subjects:
+        if js in subject:
+            return True
+
+    return False
+
+
 def _extract_gmail(tool_name, result_str, connector, account_id):
     """Extract from gmail_get_unread, gmail_search, gmail_read_email."""
     try:
@@ -308,6 +336,10 @@ def _extract_gmail(tool_name, result_str, connector, account_id):
 
     for email in items:
         if not isinstance(email, dict) or "id" not in email:
+            continue
+
+        # Skip junk/automated emails — they pollute search results
+        if _is_junk_email(email):
             continue
 
         entities = []
@@ -818,9 +850,11 @@ def search(query, connector=None, max_results=None):
     except Exception:
         pass
 
-    # Sort by date, cap at max_results
-    results.sort(key=lambda r: r.get("date", ""), reverse=True)
-    results = results[:max_results]
+    # User notes first (explicitly saved by user = highest value), then others by date
+    notes = [r for r in results if r.get("connector") == "user_notes"]
+    others = sorted([r for r in results if r.get("connector") != "user_notes"],
+                    key=lambda r: r.get("date", ""), reverse=True)
+    results = (notes + others)[:max_results]
 
     if not results:
         return json.dumps({
